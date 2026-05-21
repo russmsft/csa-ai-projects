@@ -1,0 +1,13 @@
+Microsoft Cloud Solution Architect - Onboarding Guide
+
+Key Requirements:
+1. Complete Azure Fundamentals certification within 30 days
+2. Shadow 3 customer engagements in the first 60 days
+3. Deliver your first technical presentation by day 90
+
+Important Dates:
+- Day 30: AZ-900 certification deadline
+- Day 60: First customer meeting debrief due
+- Day 90: Ramp-up review with manager
+
+The main subject of this document is onboarding guidance for new CSA hires at Microsoft.

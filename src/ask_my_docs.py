@@ -107,7 +107,9 @@ def ask(question: str, vector_store_id: str, model: str = "gpt-4.1-mini") -> str
 
 
 def main():
-    PDF_PATH = "sample.txt"   # ← change to your PDF or .txt document
+    # Resolve sample.txt relative to the repo root (one level above src/)
+    _REPO_ROOT = pathlib.Path(__file__).parent.parent
+    PDF_PATH = str(_REPO_ROOT / "sample.txt")   # ← change to your PDF or .txt document
     STORE_NAME = "ask-my-docs-store"
     MODEL = "gpt-4.1-mini"
 

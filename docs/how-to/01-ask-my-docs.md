@@ -60,6 +60,8 @@ AzureOpenAI client (DefaultAzureCredential)
 
 > **Already done for you:** The complete, runnable script is at `src/ask_my_docs.py` in this repo. You don't need to write any code — just follow Steps 1–2 to configure your environment, then jump to [Test It](#test-it) to run it.
 >
+> **Want to build it yourself?** That's a great way to learn. Create a new file (e.g. `src/my_ask_my_docs.py`), then copy each code block from Steps 3–6 below into it in order — top to bottom. Every block is a self-contained piece; together they form the complete script. You can also open `src/ask_my_docs.py` alongside this guide to see exactly how each step maps to the finished code.
+>
 > The steps below explain **what each part of the script does** so you understand it well enough to adapt it for your own projects.
 
 | Guide step | Where it lives in `src/ask_my_docs.py` |

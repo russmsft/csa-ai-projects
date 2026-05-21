@@ -1,30 +1,28 @@
-# 01 — Ask My Docs: Build a Foundry File Search Agent
+# 01 — Ask My Docs: RAG Over Your Documents with Azure OpenAI
 
-Give your documents a voice. This guide wires up a Foundry prompt agent with File Search so you can upload PDFs and get cited, accurate answers back in seconds.
+Give your documents a voice. This guide wires up Azure OpenAI File Search so you can upload any document and get cited, accurate answers back in seconds — no custom chunking, no vector DB to manage.
 
 ---
 
 ## What You're Building
 
-A Python script that uploads a PDF to Microsoft Foundry, creates a vector store over it, and attaches a `FileSearchTool` to a GPT-4.1-mini agent. You ask questions in plain English; the agent returns answers with document citations so you can verify every claim.
+A Python script that uploads a document to Azure OpenAI, creates a managed vector store over it, then uses the Responses API with `file_search` to answer questions in plain English. Every answer includes document citations so you can verify every claim.
 
-This is the fastest path to production RAG — no custom chunking pipeline, no vector DB to manage, no embeddings code to write yourself.
+This is the fastest path to production RAG — no embeddings code, no external vector database, no agent framework required.
 
 ---
 
 ## Prerequisites
 
-- Azure subscription with Microsoft Foundry (AI Foundry hub + project created at [https://ai.azure.com](https://ai.azure.com))
+- Azure subscription with an Azure AI Services (Foundry) resource — `csa-onboarding-foundry` was provisioned for you
 - Python 3.11+
-- `azure-ai-projects >= 2.1.0`, `openai >= 2.37.0`, and `azure-identity` installed
-- Azure CLI logged in (`az login`) with Contributor on the Foundry project
-- A PDF you want to query (a product spec, runbook, or HR policy works fine)
+- `openai >= 1.30.0`, `azure-identity`, and `python-dotenv` installed
+- Azure CLI logged in (`az login`) with Cognitive Services User on the resource
+- A document you want to query (PDF, .txt, .md — a product spec, runbook, or policy works great)
 
 ```bash
-pip install "azure-ai-projects>=2.1.0" azure-identity python-dotenv
+pip install "openai>=1.30.0" azure-identity python-dotenv
 ```
-
-> **Note on SDK versions:** As of May 2026, `azure-ai-projects` 2.x uses the OpenAI client (`get_openai_client()`) for all file, vector store, and agent interactions. The older `client.agents.*` sub-client from v1.x is no longer available. The code in this guide targets v2.1.0+.
 
 ---
 
@@ -34,38 +32,43 @@ pip install "azure-ai-projects>=2.1.0" azure-identity python-dotenv
 You (Python script)
         │
         ▼
-AIProjectClient ──► Foundry Agent Service
-        │                    │
-        │            FileSearchTool
-        │                    │
-        │            Vector Store (Foundry-managed)
-        │                    │
-        │            Uploaded PDF(s)
+AzureOpenAI client (DefaultAzureCredential)
         │
-        ▼
-  Agent Thread ──► GPT-4.1-mini ──► Response + Citations
+        ├─► openai.files.create()          # upload document
+        │
+        ├─► openai.vector_stores.create()  # chunk + embed automatically
+        │
+        └─► openai.responses.create()      # query with file_search tool
+                    │
+                    ▼
+            GPT-4.1-mini ──► Answer + Citations
 ```
 
-**Data flow:** Your PDF is uploaded to Foundry storage → chunked and embedded automatically → stored in a managed vector store → retrieved at query time → passed as context to GPT-4.1-mini → response includes `[source: filename, page N]` citations.
+**Data flow:** Document uploaded → chunked and embedded automatically → stored in a managed vector store → retrieved at query time → passed as context to GPT-4.1-mini → response includes source citations.
 
 ---
 
 ## Step-by-Step Build
 
-### Step 1 — Set your project endpoint
+### Step 1 — Set your endpoint
 
 ```bash
-# Find your endpoint in AI Foundry portal: Project → Overview → "API endpoint"
-# It looks like: https://<hub-name>.ai.azure.com/api/projects/<project-name>
-export FOUNDRY_PROJECT_ENDPOINT="https://<hub>.ai.azure.com/api/projects/<project>"
+# Your Azure AI Services endpoint — find it in the Azure Portal:
+# Cognitive Services resource → Keys and Endpoint
+export AZURE_OPENAI_ENDPOINT="https://csa-onboarding-foundry.cognitiveservices.azure.com/"
 ```
 
-Store it in a `.env` file — never hardcode it.
+Store it in a `.env` file — never hardcode it. Copy `.env.example` to get started:
+
+```bash
+cp .env.example .env
+# Then edit .env and set AZURE_OPENAI_ENDPOINT
+```
 
 ### Step 2 — Install dependencies
 
 ```bash
-pip install "azure-ai-projects>=2.1.0" azure-identity python-dotenv
+pip install "openai>=1.30.0" azure-identity python-dotenv
 ```
 
 ### Step 3 — Create the client
@@ -73,21 +76,24 @@ pip install "azure-ai-projects>=2.1.0" azure-identity python-dotenv
 ```python
 import os
 from dotenv import load_dotenv
-from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 
 load_dotenv()
 
-PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
+ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 
-# AIProjectClient authenticates with your az login token
-client = AIProjectClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential()
+# get_bearer_token_provider wraps DefaultAzureCredential for use with openai SDK
+token_provider = get_bearer_token_provider(
+    DefaultAzureCredential(),
+    "https://cognitiveservices.azure.com/.default"
 )
 
-# All file, vector store, and agent calls go through the OpenAI client
-openai = client.get_openai_client()
+openai = AzureOpenAI(
+    azure_endpoint=ENDPOINT,
+    azure_ad_token_provider=token_provider,
+    api_version="2025-04-01-preview",
+)
 ```
 
 `DefaultAzureCredential` picks up your `az login` token automatically. No API keys needed.
@@ -203,42 +209,43 @@ The complete, runnable version of this script is at `src/ask_my_docs.py` in this
 
 ## Test It
 
-Run the script against a PDF you know well so you can verify accuracy:
+Run the script against `sample.txt` (included in the repo) to verify everything works before using your own document:
 
 ```bash
-# Copy .env.example → .env and set your endpoint
-cp .env.example .env
-# Edit .env with your FOUNDRY_PROJECT_ENDPOINT
-
+# Ensure .env is set with your AZURE_OPENAI_ENDPOINT
 python src/ask_my_docs.py
 ```
 
 Expected output:
 
 ```
-Uploading my-policy.pdf (142 KB)...
-  File ID: file-abc123  status=processed
+Uploading sample.txt (0 KB)...
+  File ID: assistant-abc123  status=processed
 Creating vector store 'ask-my-docs-store'...
   Vector store ID: vs-xyz789  status=in_progress
-  Waiting for indexing... status=in_progress
-  Indexing complete. Chunks: 1
+  Waiting for indexing... status=completed
+  Indexing complete. Chunks indexed: 1
 
 ============================================================
 
 ❓ What is the main subject of this document?
-💬 The document covers the company's remote work policy, including eligibility
-criteria, equipment provisions, and security requirements for employees working
-outside the office.
-   ↳ Source: file-abc123
+💬 The main subject of the document is onboarding guidance for new Cloud Solution
+Architect (CSA) hires at Microsoft, including key requirements, milestones, and
+important dates within the first 90 days.
 
 ❓ List any key requirements or commitments mentioned.
-💬 Key requirements include: VPN usage for all remote sessions, encrypted
-laptop storage, and manager approval for remote work schedules exceeding
-3 days per week.
-   ↳ Source: file-abc123
+💬 1. Complete Azure Fundamentals certification within 30 days.
+   2. Shadow 3 customer engagements in the first 60 days.
+   3. Deliver your first technical presentation by day 90.
+
+❓ Are there any deadlines or dates referenced?
+💬 Yes — Day 30: AZ-900 deadline, Day 60: debrief due, Day 90: ramp-up review.
+
+============================================================
+Done. To reuse this vector store, set VECTOR_STORE_ID=vs-xyz789
 ```
 
-**Verify citations are accurate:** Open the PDF and confirm the cited content actually says what the agent claims. If citations are wrong or missing, check that the PDF isn't a scanned image — Document Intelligence preprocessing (Guide 05) may be needed.
+**To query your own document**, edit `src/ask_my_docs.py` and change the `_REPO_ROOT / "sample.txt"` line to point at your file.
 
 **Add a second document:**
 

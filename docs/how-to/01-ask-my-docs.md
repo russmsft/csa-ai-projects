@@ -78,7 +78,7 @@ AzureOpenAI client (DefaultAzureCredential)
 ```bash
 # Your Azure AI Services endpoint — find it in the Azure Portal:
 # Cognitive Services resource → Keys and Endpoint
-export AZURE_OPENAI_ENDPOINT="https://csa-onboarding-foundry.cognitiveservices.azure.com/"
+export AZURE_OPENAI_ENDPOINT="https://<your-resource-name>.cognitiveservices.azure.com/"
 ```
 
 Store it in a `.env` file — never hardcode it. Copy `.env.example` to get started:
@@ -128,7 +128,7 @@ import pathlib
 import time
 
 def upload_pdf(pdf_path: str):
-    """Upload a PDF to Foundry and return the file object."""
+    """Upload a document to Azure OpenAI and return the file object."""
     path = pathlib.Path(pdf_path)
     print(f"Uploading {path.name} ({path.stat().st_size // 1024} KB)...")
     with open(path, "rb") as f:
@@ -159,7 +159,7 @@ def create_vector_store(file_id: str, store_name: str):
 
 ### Step 5 — Ask a question using the Responses API
 
-In SDK v2.1.0, you pass the `file_search` tool directly to `openai.responses.create()`. No separate agent registration needed for basic Q&A.
+In the Responses API, you pass the `file_search` tool directly to `openai.responses.create()`. No separate agent registration needed for basic Q&A.
 
 ```python
 def ask(question: str, vector_store_id: str, model: str = "gpt-4.1-mini"):
@@ -287,23 +287,23 @@ openai.vector_stores.files.create(
 
 ## Common Mistakes
 
-- **Scanned PDFs return empty text.** Foundry's file upload does basic text extraction. If your PDF is a scanned image, pre-process it with Azure AI Document Intelligence first (see Guide 05).
-- **Agent answers questions not in the docs.** Check your system prompt — add `"Only answer using the provided documents."` if hallucination is a problem.
-- **Thread reuse leaks context.** Create a new thread for each user session. Reusing threads across users exposes previous conversation history.
+- **Scanned PDFs return empty text.** The file upload API does basic text extraction. If your PDF is a scanned image, pre-process it with Azure AI Document Intelligence first (see Guide 05).
+- **Model answers questions not in the docs.** Check your system prompt — the `instructions` parameter should include `"Only answer using the provided documents."` to prevent hallucination.
+- **Reusing a vector store across sessions.** Note the `VECTOR_STORE_ID` printed at the end of each run — pass it directly to `ask()` instead of re-uploading your document every time.
 
 ---
 
 ## Extend It
 
 1. **Multi-tenant isolation:** Create a separate vector store per user/team. Pass the correct `vector_store_id` based on the authenticated user's group membership from Entra ID.
-2. **Streaming responses:** Replace `create_and_process_run` with `create_stream` and yield tokens to a frontend for real-time display.
-3. **Slack / Teams bot:** Wrap the `ask()` function in an Azure Function with an HTTP trigger, then register it as a Teams bot via Bot Framework. Now your whole org can query the docs from Teams.
+2. **Streaming responses:** Use `openai.responses.stream()` instead of `create()` and yield tokens to a frontend for real-time display.
+3. **Slack / Teams bot:** Wrap the `ask()` function in an Azure Function with an HTTP trigger, then register it as a Teams bot via Bot Framework. Your whole org can query docs from Teams.
 
 ---
 
 ## Resources
 
-- [Foundry Agent Service — File Search](https://learn.microsoft.com/azure/ai-foundry/agents/how-to/tools/file-search)
-- [azure-ai-projects SDK reference](https://learn.microsoft.com/python/api/overview/azure/ai-projects-readme)
-- [Vector stores in Foundry](https://learn.microsoft.com/azure/ai-foundry/agents/concepts/vector-stores)
+- [Azure OpenAI File Search](https://learn.microsoft.com/azure/ai-services/openai/how-to/file-search)
+- [Azure OpenAI Responses API](https://learn.microsoft.com/azure/ai-services/openai/how-to/responses)
+- [AzureOpenAI Python SDK](https://learn.microsoft.com/python/api/overview/azure/openai-readme)
 - [DefaultAzureCredential auth chain](https://learn.microsoft.com/python/api/azure-identity/azure.identity.defaultazurecredential)

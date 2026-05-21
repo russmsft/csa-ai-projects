@@ -1,33 +1,40 @@
 """
-ask_my_docs.py — Ask My Docs: Foundry File Search Agent
-Works with azure-ai-projects==2.1.0 + openai==2.37.0
+ask_my_docs.py — Ask My Docs: RAG over documents using Azure OpenAI
+Works with openai>=1.30.0
 
 Usage:
-  1. Set FOUNDRY_PROJECT_ENDPOINT in .env
+  1. Set AZURE_OPENAI_ENDPOINT in .env  (e.g. https://<name>.cognitiveservices.azure.com/)
   2. Place a PDF at the path in PDF_PATH
   3. Run: python ask_my_docs.py
+
+Authentication: uses DefaultAzureCredential (az login / managed identity).
 """
 import os
 import pathlib
 import time
 from dotenv import load_dotenv
-from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 
 load_dotenv()
 
-PROJECT_ENDPOINT = os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
-if not PROJECT_ENDPOINT:
+ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
+if not ENDPOINT:
     raise ValueError(
-        "Set FOUNDRY_PROJECT_ENDPOINT in .env\n"
-        "Format: https://<hub>.ai.azure.com/api/projects/<project>"
+        "Set AZURE_OPENAI_ENDPOINT in .env\n"
+        "Format: https://<account-name>.cognitiveservices.azure.com/"
     )
 
-client = AIProjectClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential()
+token_provider = get_bearer_token_provider(
+    DefaultAzureCredential(),
+    "https://cognitiveservices.azure.com/.default"
 )
-openai = client.get_openai_client()
+
+openai = AzureOpenAI(
+    azure_endpoint=ENDPOINT,
+    azure_ad_token_provider=token_provider,
+    api_version="2025-04-01-preview",
+)
 
 
 def upload_pdf(pdf_path: str):
@@ -100,7 +107,7 @@ def ask(question: str, vector_store_id: str, model: str = "gpt-4.1-mini") -> str
 
 
 def main():
-    PDF_PATH = "sample.pdf"   # ← change to your PDF
+    PDF_PATH = "sample.txt"   # ← change to your PDF or .txt document
     STORE_NAME = "ask-my-docs-store"
     MODEL = "gpt-4.1-mini"
 

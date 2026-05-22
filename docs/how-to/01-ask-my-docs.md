@@ -323,11 +323,26 @@ Done. To reuse this vector store, set VECTOR_STORE_ID=vs-xyz789
 
 **To query your own document**, edit `src/ask_my_docs.py` and change the `_REPO_ROOT / "sample.txt"` line to point at your file.
 
-**Try a "trap question" to verify abstention:**
+**Try a "trap question" — this is a critical demo moment:**
 ```python
-ask("What is the company's parental leave policy?", vs.id)
+ask("What is the quarterly revenue target for CSAs in FY26?", vs.id)
 ```
-The model should respond with something like: *"The provided documents do not contain information about parental leave policy."* — not a hallucinated answer. This is a key demo moment: show customers that the model refuses to guess.
+
+> ⚠️ **Important:** With a soft instruction like `"If the answer is not in the documents, say so"`, the model may still hallucinate a confident-sounding answer (e.g. "$10 million per quarter") even when that information isn't in your document at all. This is a known LLM behavior — the model fills gaps with plausible-sounding training data.
+>
+> **Use a stronger instruction to enforce abstention:**
+> ```python
+> instructions=(
+>     "You MUST NOT answer from general knowledge. "
+>     "Only answer using information retrieved from the provided documents. "
+>     "If the answer cannot be found in the retrieved document chunks, respond with exactly: "
+>     "'I cannot find that information in the provided documents.' "
+>     "Do not guess, infer, or supplement from training data."
+> )
+> ```
+> The complete script at `src/ask_my_docs.py` uses this stronger instruction.
+>
+> **CSA talk-track:** *"Watch what happens when I ask something that's not in the document. Notice there are no source citations in the answer — that's your signal. Always show customers both the answer AND the citations. No citations means treat the answer with suspicion. This is why grounding and citation display matter in production."*
 
 **Add a second document:**
 
@@ -351,7 +366,7 @@ openai.vector_stores.files.create(
 ## Common Mistakes
 
 - **Scanned PDFs return empty text.** The file upload API does basic text extraction. If your PDF is a scanned image, pre-process it with Azure AI Document Intelligence first (see Guide 05).
-- **Model answers questions not in the docs.** Check your system prompt — the `instructions` parameter should include `"Only answer using the provided documents."` to prevent hallucination.
+- **Model answers questions not in the docs.** A soft instruction like `"If the answer is not in the documents, say so"` is often not enough — the model can still hallucinate confident answers from its training data. Use a strong prohibition: `"You MUST NOT answer from general knowledge. If the answer cannot be found in the retrieved document chunks, respond with exactly: 'I cannot find that information in the provided documents.'"` The script at `src/ask_my_docs.py` uses this pattern.
 - **Reusing a vector store across sessions.** Note the `VECTOR_STORE_ID` printed at the end of each run — pass it directly to `ask()` instead of re-uploading your document every time.
 
 ---

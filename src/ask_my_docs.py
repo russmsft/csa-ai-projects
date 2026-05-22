@@ -96,9 +96,11 @@ def ask(question: str, vector_store_id: str, model: str = "gpt-4.1-mini") -> str
             "vector_store_ids": [vector_store_id],
         }],
         instructions=(
-            "Answer only using the provided documents. "
-            "Always cite the source file and section. "
-            "If the answer is not in the documents, say so."
+            "You MUST NOT answer from general knowledge. "
+            "Only answer using information retrieved from the provided documents. "
+            "If the answer cannot be found in the retrieved document chunks, respond with exactly: "
+            "'I cannot find that information in the provided documents.' "
+            "Do not guess, infer, or supplement from training data."
         ),
         include=["file_search_call.results"],
     )

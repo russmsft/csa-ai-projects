@@ -6,20 +6,27 @@ Build an HR or IT policy chatbot that stays on-topic, answers grounded in your a
 
 ## What You're Building
 
-A web chatbot deployed on Azure App Service with Entra ID authentication. The backend is a FastAPI app that creates a Foundry prompt agent with Foundry IQ knowledge grounding. You upload policy PDFs through the Foundry portal; the agent retrieves relevant chunks automatically. A minimal HTML/JS frontend handles the chat UI.
+A web chatbot deployed on Azure App Service with Entra ID authentication. The backend is a FastAPI app that calls a Foundry model through the Responses API with the `file_search` tool, grounded in your policy documents (Foundry IQ or a vector store). You upload policy PDFs once; the model retrieves relevant chunks automatically and cites them. A minimal HTML/JS frontend handles the chat UI.
 
 ---
 
 ## Prerequisites
 
-- Microsoft Foundry project with Foundry IQ enabled (check: Project → Knowledge → Foundry IQ)
-- Azure App Service (B1 or higher, Python 3.11 runtime)
-- Entra ID app registration for auth (or use Easy Auth)
-- Python 3.11+, `fastapi`, `uvicorn`, `azure-ai-projects`, `azure-identity`
-- 1-5 PDF policy documents to test with
+- A **Microsoft Foundry / Azure AI Services resource** with a `gpt-4.1-mini` deployment:
+  ```bash
+  az cognitiveservices account deployment create --name <res> --resource-group <rg> \
+    --deployment-name gpt-4.1-mini --model-name gpt-4.1-mini --model-version 2025-04-14 \
+    --model-format OpenAI --sku-name GlobalStandard --sku-capacity 10
+  ```
+- Foundry IQ (managed knowledge) **or** a vector store to ground answers — Step 1 creates one and gives you a vector store ID (`vs-…`).
+- Azure App Service (B1 or higher, Python 3.11 runtime) for hosting the chat UI.
+- Azure CLI logged in with **Cognitive Services OpenAI User** (or Contributor) on the resource. This demo uses **Entra ID auth, not API keys**.
+- `AZURE_OPENAI_ENDPOINT` (the `https://<resource>.cognitiveservices.azure.com/` host) and `POLICY_VECTOR_STORE_ID` set in `.env`.
+- Python 3.11+
+- 1–5 policy documents (PDF, `.txt`, or `.md`) to test with
 
 ```bash
-pip install azure-ai-projects azure-identity fastapi uvicorn python-dotenv
+pip install "openai>=1.30.0" azure-identity fastapi uvicorn python-dotenv
 ```
 
 ---
@@ -34,11 +41,11 @@ Azure App Service (FastAPI)
   └── Entra ID auth (Easy Auth middleware)
         │
         ▼
-AIProjectClient
-  └── Prompt Agent (GPT-4.1-mini)
+AzureOpenAI client → Responses API (GPT-4.1-mini)
+  └── file_search tool
         │
         ▼
-Foundry IQ (knowledge grounding)
+Foundry IQ / vector store (knowledge grounding)
   ├── HR Policy.pdf
   ├── IT Security Policy.pdf
   └── Employee Handbook.pdf
@@ -51,14 +58,36 @@ Answer + source citations
 
 ## Step-by-Step Build
 
-### Step 1 — Upload documents via Foundry portal
+### Step 1 — Upload documents and create the knowledge index
+
+**Option A — Foundry portal (Foundry IQ):**
 
 1. Open [https://ai.azure.com](https://ai.azure.com) → your project
 2. Navigate to **Knowledge** → **Foundry IQ**
 3. Click **Add data source** → **Upload files**
 4. Upload your PDFs (HR policy, IT security policy, employee handbook, etc.)
 5. Wait for indexing to complete (status turns green)
-6. Copy the **Knowledge ID** — you'll need it in the agent definition
+6. Copy the **vector store ID** (`vs-…`) it exposes — that's what the `file_search` tool needs
+
+**Option B — code (no portal):** upload files and create a vector store directly, exactly as in [Project 01](01-ask-my-docs.md):
+
+```python
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
+
+client = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    azure_ad_token_provider=get_bearer_token_provider(
+        DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"),
+    api_version="2025-04-01-preview",
+)
+file_ids = []
+for path in ["HR-Policy.pdf", "IT-Security-Policy.pdf"]:
+    with open(path, "rb") as f:
+        file_ids.append(client.files.create(file=f, purpose="assistants").id)
+vs = client.vector_stores.create(name="policy-chatbot-store", file_ids=file_ids)
+print("POLICY_VECTOR_STORE_ID:", vs.id)   # vs-…
+```
 
 > **Gotcha:** Foundry IQ processes PDFs natively, but for PDFs with complex tables or multi-column layouts, accuracy degrades. Use Azure AI Document Intelligence preprocessing for those.
 
@@ -67,19 +96,13 @@ Answer + source citations
 ```python
 # app.py
 import os
-import json
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
-from azure.ai.projects.models import (
-    FileSearchTool,
-    MessageRole,
-    PromptAgentDefinition
-)
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 
 load_dotenv()
 
@@ -91,103 +114,81 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
-KNOWLEDGE_ID = os.environ["FOUNDRY_IQ_KNOWLEDGE_ID"]
+ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]          # https://<resource>.cognitiveservices.azure.com/
+VECTOR_STORE_ID = os.environ["POLICY_VECTOR_STORE_ID"]  # vs-… from Step 1
+MODEL = os.environ.get("CHAT_MODEL", "gpt-4.1-mini")
 
-ai_client = AIProjectClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential()
+# Entra ID auth (managed identity in App Service, az login locally) — no API keys
+token_provider = get_bearer_token_provider(
+    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+)
+client = AzureOpenAI(
+    azure_endpoint=ENDPOINT,
+    azure_ad_token_provider=token_provider,
+    api_version="2025-04-01-preview",
 )
 
-# Create agent once at startup
-_agent_id: str | None = None
-
-def get_agent_id() -> str:
-    global _agent_id
-    if _agent_id:
-        return _agent_id
-
-    # Attach the Foundry IQ knowledge source via FileSearchTool
-    file_search = FileSearchTool(vector_store_ids=[KNOWLEDGE_ID])
-
-    agent_def = PromptAgentDefinition(
-        model="gpt-4.1-mini",
-        name="policy-chatbot",
-        instructions=(
-            "You are an HR/IT policy assistant for our company. "
-            "Answer questions using only the provided policy documents. "
-            "Always cite the specific policy document and section. "
-            "If the answer isn't in the documents, say: "
-            "'I don't have that information in our current policies — "
-            "please contact HR directly.' "
-            "Never guess at policy details. Never provide legal advice."
-        ),
-        tools=[file_search.definitions],
-        tool_resources=file_search.resources,
-    )
-    agent = ai_client.agents.create_version(definition=agent_def)
-    _agent_id = agent.id
-    return _agent_id
+INSTRUCTIONS = (
+    "You are an HR/IT policy assistant for our company. "
+    "Answer questions using only the policy documents returned by file search. "
+    "Always cite the specific policy document. "
+    "If the answer isn't in the documents, say exactly: "
+    "\"I don't have that information in our current policies - please contact HR directly.\" "
+    "Never guess at policy details. Never provide legal advice."
+)
 
 
 class ChatRequest(BaseModel):
     message: str
-    thread_id: str | None = None   # None = new conversation
+    previous_response_id: str | None = None   # None = new conversation
 
 
 class ChatResponse(BaseModel):
     reply: str
-    thread_id: str
+    response_id: str
     citations: list[dict]
+
+
+def _extract(response):
+    """Pull answer text and file_search citations out of a Responses API result."""
+    answer, citations, seen = "", [], set()
+    for item in response.output:
+        if getattr(item, "type", None) == "message":
+            for block in item.content:
+                if getattr(block, "type", None) == "output_text":
+                    answer += block.text
+                    # Responses API file_search annotations are flat
+                    # AnnotationFileCitation objects (type/file_id/filename) —
+                    # not the older Assistants-style nested `ann.file_citation`.
+                    for ann in getattr(block, "annotations", None) or []:
+                        if getattr(ann, "type", None) == "file_citation":
+                            name = getattr(ann, "filename", None) or getattr(ann, "file_id", "")
+                            if name and name not in seen:
+                                seen.add(name)
+                                citations.append(
+                                    {"filename": name, "file_id": getattr(ann, "file_id", "")}
+                                )
+    return answer, citations
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    agent_id = get_agent_id()
-
-    # Reuse thread for ongoing conversations
-    if req.thread_id:
-        thread_id = req.thread_id
-    else:
-        thread = ai_client.agents.create_thread()
-        thread_id = thread.id
-
-    ai_client.agents.create_message(
-        thread_id=thread_id,
-        role=MessageRole.USER,
-        content=req.message
-    )
-
-    run = ai_client.agents.create_and_process_run(
-        thread_id=thread_id,
-        agent_id=agent_id
-    )
-
-    if run.status != "completed":
-        raise HTTPException(
-            status_code=500,
-            detail=f"Agent run failed: {run.status}"
+    try:
+        # The Responses API keeps conversation state server-side via
+        # previous_response_id — no threads/runs bookkeeping needed.
+        response = client.responses.create(
+            model=MODEL,
+            input=req.message,
+            previous_response_id=req.previous_response_id,
+            instructions=INSTRUCTIONS,
+            tools=[{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}],
+            include=["file_search_call.results"],
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    messages = ai_client.agents.list_messages(thread_id=thread_id)
-    last = messages.get_last_message_by_role(MessageRole.ASSISTANT)
-
-    reply_text = last.content[0].text.value
-    citations = []
-    for block in last.content:
-        if hasattr(block, "text"):
-            for ann in block.text.annotations:
-                if hasattr(ann, "file_citation"):
-                    citations.append({
-                        "file_id": ann.file_citation.file_id,
-                        "quote": getattr(ann.file_citation, "quote", "")
-                    })
-
-    return ChatResponse(
-        reply=reply_text,
-        thread_id=thread_id,
-        citations=citations
-    )
+    reply, citations = _extract(response)
+    return ChatResponse(reply=reply, response_id=response.id, citations=citations)
 
 
 @app.get("/health")
@@ -259,7 +260,7 @@ app.mount("/", StaticFiles(directory="static", html=True), name="static")
 </div>
 
 <script>
-  let threadId = null;
+  let previousResponseId = localStorage.getItem('policyResponseId');
 
   async function sendMessage() {
     const input = document.getElementById('user-input');
@@ -275,10 +276,11 @@ app.mount("/", StaticFiles(directory="static", html=True), name="static")
       const res = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, thread_id: threadId })
+        body: JSON.stringify({ message: text, previous_response_id: previousResponseId })
       });
       const data = await res.json();
-      threadId = data.thread_id;
+      previousResponseId = data.response_id;
+      localStorage.setItem('policyResponseId', previousResponseId);
 
       const msgDiv = appendMessage(data.reply, 'bot');
       if (data.citations && data.citations.length > 0) {
@@ -335,8 +337,8 @@ az webapp config appsettings set \
   --name policy-chatbot-app \
   --resource-group $RG \
   --settings \
-    FOUNDRY_PROJECT_ENDPOINT="https://<hub>.ai.azure.com/api/projects/<project>" \
-    FOUNDRY_IQ_KNOWLEDGE_ID="<your-knowledge-id>" \
+    AZURE_OPENAI_ENDPOINT="https://<resource>.cognitiveservices.azure.com/" \
+    POLICY_VECTOR_STORE_ID="<vs-id-from-step-1>" \
     SCM_DO_BUILD_DURING_DEPLOYMENT=true
 
 # Enable managed identity so the app can authenticate to Foundry
@@ -344,12 +346,12 @@ az webapp identity assign \
   --name policy-chatbot-app \
   --resource-group $RG
 
-# Grant the managed identity access to the Foundry project
+# Grant the managed identity data-plane access to the Foundry / AI Services resource
 # (use the principal ID from the output above)
 az role assignment create \
   --assignee <principal-id> \
-  --role "Azure AI Developer" \
-  --scope /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.MachineLearningServices/workspaces/<hub>
+  --role "Cognitive Services OpenAI User" \
+  --scope $(az cognitiveservices account show --name <res> --resource-group $RG --query id -o tsv)
 ```
 
 ### Step 5 — Enable Entra ID auth (Easy Auth)
@@ -395,9 +397,9 @@ Watch for:
 
 ## Common Mistakes
 
-- **Agent created on every request.** The code above caches `_agent_id` at startup. Without this, you'd create a new agent on every chat message — this is slow and wastes quota.
-- **Thread ID not persisted across browser sessions.** Store `thread_id` in `localStorage` or a server-side session. Without it, every page refresh starts a new conversation.
-- **Foundry IQ knowledge ID vs vector store ID.** They're different identifiers. Foundry IQ knowledge IDs start with `ki-`; vector store IDs start with `vs-`. Don't confuse them.
+- **Reaching for the old Assistants `agents` API.** `azure-ai-projects` 2.x removed the threads/runs Assistants surface — `AIProjectClient` has no `.agents`, and `MessageRole`/`PromptAgentDefinition`/`FileSearchTool` aren't importable. Use the `AzureOpenAI` Responses API with the `file_search` tool, as shown above.
+- **Response ID not persisted across browser sessions.** Store the `response_id` in `localStorage` (the UI above does) or a server-side session. Without it, every page refresh starts a new conversation.
+- **Passing the wrong knowledge identifier.** The `file_search` tool wants a **vector store ID** (`vs-…`), not a file ID (`assistant-…`) or a portal display name. Step 1 prints the value you need.
 
 ---
 

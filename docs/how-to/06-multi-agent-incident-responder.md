@@ -12,15 +12,21 @@ Three Foundry prompt agents working in concert: a **Diagnostician** that queries
 
 ## Prerequisites
 
-- Microsoft Foundry project with GPT-4.1 deployed
-- Azure Application Insights resource with query access
-- Azure AI Search index containing runbook documents
+- A **Microsoft Foundry / Azure AI Services resource** with a `gpt-4.1` deployment:
+  ```bash
+  az cognitiveservices account deployment create --name <res> --resource-group <rg> \
+    --deployment-name gpt-4.1 --model-name gpt-4.1 --model-version 2025-04-14 \
+    --model-format OpenAI --sku-name GlobalStandard --sku-capacity 10
+  ```
+- Azure Application Insights (or a Log Analytics workspace) you can query — you'll need its **workspace (customer) ID**.
+- Azure AI Search service with an index of runbook documents (Step 0 below seeds one).
+- Azure CLI logged in with **Cognitive Services OpenAI Contributor** on the AI Services resource, **Search Index Data Reader** on the search service, and **Log Analytics Reader** on the workspace. This demo uses **Entra ID auth, not keys** (enable AAD on Search with `az search service update --auth-options aadOrApiKey`).
+- `AZURE_OPENAI_ENDPOINT`, `APP_INSIGHTS_WORKSPACE_ID`, and `SEARCH_ENDPOINT` set in `.env`.
 - Python 3.11+
-- `azure-ai-projects`, `azure-identity`, `azure-monitor-query`, `azure-search-documents`
 
 ```bash
-pip install azure-ai-projects azure-identity azure-monitor-query \
-  azure-search-documents python-dotenv asyncio
+pip install "openai>=1.30.0" azure-identity azure-monitor-query \
+  azure-search-documents python-dotenv
 ```
 
 ---
@@ -36,7 +42,7 @@ Python Orchestrator
   │                       │
   ▼                       ▼
 Agent 1: Diagnostician   Agent 2: Researcher
-  └── FunctionTool         └── FunctionTool
+  └── function tool          └── function tool
       (App Insights KQL)       (AI Search runbook query)
   │                       │
   └──── [fan-in] ─────────┘
@@ -53,35 +59,76 @@ Agent 1: Diagnostician   Agent 2: Researcher
 
 ## Step-by-Step Build
 
-### Step 1 — Set up the Application Insights function
+### Step 0 — Seed a runbook index (skip if you already have one)
+
+```python
+import os
+from azure.identity import DefaultAzureCredential
+from azure.search.documents.indexes import SearchIndexClient
+from azure.search.documents.indexes.models import (
+    SearchIndex, SimpleField, SearchableField, SearchFieldDataType)
+from azure.search.documents import SearchClient
+
+endpoint = os.environ["SEARCH_ENDPOINT"]
+index_name = os.environ.get("SEARCH_INDEX", "runbooks")
+cred = DefaultAzureCredential()
+
+SearchIndexClient(endpoint, cred).create_or_update_index(
+    SearchIndex(name=index_name, fields=[
+        SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+        SearchableField(name="title", type=SearchFieldDataType.String),
+        SearchableField(name="content", type=SearchFieldDataType.String),
+    ]))
+
+SearchClient(endpoint, index_name, cred).upload_documents(documents=[
+    {"id": "rb-001",
+     "title": "Payment API elevated error rate (5xx) runbook",
+     "content": "Symptoms: payment-api returns HTTP 5xx and error rate exceeds 2%. "
+                "Remediation: check gateway dependency health; if the connection pool is "
+                "exhausted, restart the payment-api deployment; fail over to the secondary "
+                "gateway if errors persist >10 min; roll back the latest deployment if it "
+                "correlates. ETA 15-30 min. Escalation: Payments on-call (PagerDuty PAY-ONCALL)."},
+    {"id": "rb-002", "title": "Database connection pool exhaustion runbook",
+     "content": "Symptoms: timeouts and 'connection pool exhausted' exceptions. Remediation: "
+                "increase max pool size, kill long-running queries, scale out read replicas."},
+])
+print("Seeded runbook index:", index_name)
+```
+
+### Step 1 — Set up the clients
+
+All three agents run through one `AzureOpenAI` client (chat completions + function tools). App Insights and AI Search both authenticate with the same `DefaultAzureCredential` — no keys.
 
 ```python
 import os
 import json
-import asyncio
+import time
+from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
-from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 from azure.monitor.query import LogsQueryClient, LogsQueryStatus
 from azure.search.documents import SearchClient
-from azure.ai.projects.models import FunctionTool, PromptAgentDefinition, MessageRole
 
 load_dotenv()
 
-PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
+ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 APP_INSIGHTS_WORKSPACE_ID = os.environ["APP_INSIGHTS_WORKSPACE_ID"]
 SEARCH_ENDPOINT = os.environ["SEARCH_ENDPOINT"]
 SEARCH_INDEX = os.environ.get("SEARCH_INDEX", "runbooks")
-SEARCH_KEY = os.environ["SEARCH_KEY"]
+MODEL = os.environ.get("INCIDENT_MODEL", "gpt-4.1")
 
 credential = DefaultAzureCredential()
-ai_client = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=credential)
+openai = AzureOpenAI(
+    azure_endpoint=ENDPOINT,
+    azure_ad_token_provider=get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"),
+    api_version="2025-04-01-preview",
+)
 logs_client = LogsQueryClient(credential)
 search_client = SearchClient(
-    endpoint=SEARCH_ENDPOINT,
-    index_name=SEARCH_INDEX,
-    credential=credential
-)
+    endpoint=SEARCH_ENDPOINT, index_name=SEARCH_INDEX, credential=credential)
 ```
 
 ### Step 2 — Define the tool functions
@@ -103,14 +150,14 @@ def query_app_insights(kql_query: str, time_range_hours: int = 1) -> str:
             for table in result.tables:
                 for row in table.rows:
                     rows.append(dict(zip(table.columns, row)))
-            return json.dumps(rows[:50])  # cap at 50 rows
+            return json.dumps(rows[:50], default=str)  # cap at 50 rows; default=str for datetimes
         else:
             return json.dumps({"error": "Query failed", "details": str(result.partial_error)})
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 
-APP_INSIGHTS_TOOL_DEF = {
+APP_INSIGHTS_TOOL = {"type": "function", "function": {
     "name": "query_app_insights",
     "description": (
         "Query Application Insights using KQL to investigate errors, performance, "
@@ -131,7 +178,7 @@ APP_INSIGHTS_TOOL_DEF = {
         },
         "required": ["kql_query"]
     }
-}
+}}
 
 
 # --- Tool: search runbooks ---
@@ -153,7 +200,7 @@ def search_runbooks(query: str, top: int = 5) -> str:
     return json.dumps(docs)
 
 
-SEARCH_RUNBOOK_TOOL_DEF = {
+SEARCH_RUNBOOK_TOOL = {"type": "function", "function": {
     "name": "search_runbooks",
     "description": "Search the runbook knowledge base for troubleshooting procedures.",
     "parameters": {
@@ -171,149 +218,104 @@ SEARCH_RUNBOOK_TOOL_DEF = {
         },
         "required": ["query"]
     }
-}
+}}
 ```
 
-### Step 3 — Create the three agents
+### Step 3 — Define the three agents
+
+Each "agent" is just a system prompt plus the tools it may call. There's no agent to register — the chat API takes the instructions and tools on each call.
 
 ```python
-def create_diagnostician_agent() -> str:
-    tool = FunctionTool(functions=[APP_INSIGHTS_TOOL_DEF])
-    agent_def = PromptAgentDefinition(
-        model="gpt-4.1",
-        name="incident-diagnostician",
-        instructions=(
-            "You are an SRE incident diagnostician. When given an incident description:\n"
-            "1. Query Application Insights to understand the scope and impact\n"
-            "2. Identify the error type, affected services, and blast radius\n"
-            "3. Determine the timeline (when did it start?)\n"
-            "4. Estimate affected user count if possible\n\n"
-            "Useful KQL queries:\n"
-            "- Error rate: requests | where success == false | summarize count() by bin(timestamp, 5m)\n"
-            "- Exceptions: exceptions | order by timestamp desc | take 20\n"
-            "- Affected dependencies: dependencies | where success == false | summarize count() by target\n\n"
-            "Return a structured diagnostic report."
-        ),
-        tools=[tool.definitions],
-    )
-    agent = ai_client.agents.create_version(definition=agent_def)
-    return agent.id
+DIAGNOSTICIAN = (
+    "You are an SRE incident diagnostician. When given an incident description:\n"
+    "1. Query Application Insights to understand the scope and impact\n"
+    "2. Identify the error type, affected services, and blast radius\n"
+    "3. Determine the timeline (when did it start?)\n"
+    "4. Estimate affected user count if possible\n\n"
+    "Useful KQL queries:\n"
+    "- Error rate: requests | where success == false | summarize count() by bin(timestamp, 5m)\n"
+    "- Exceptions: exceptions | order by timestamp desc | take 20\n"
+    "- Affected dependencies: dependencies | where success == false | summarize count() by target\n\n"
+    "If telemetry is unavailable, say so and reason from the incident text. "
+    "Return a structured diagnostic report."
+)
+DIAGNOSTICIAN_TOOLS = [APP_INSIGHTS_TOOL]
 
+RESEARCHER = (
+    "You are an incident response researcher. Given an incident description:\n"
+    "1. Search the runbook index for relevant procedures\n"
+    "2. Extract the specific remediation steps\n"
+    "3. Identify any prerequisites or dependencies for the fix\n"
+    "4. Note any known past incidents of the same type\n\n"
+    "Return: recommended runbook title, step-by-step remediation, "
+    "estimated resolution time, and escalation path."
+)
+RESEARCHER_TOOLS = [SEARCH_RUNBOOK_TOOL]
 
-def create_researcher_agent() -> str:
-    tool = FunctionTool(functions=[SEARCH_RUNBOOK_TOOL_DEF])
-    agent_def = PromptAgentDefinition(
-        model="gpt-4.1",
-        name="incident-researcher",
-        instructions=(
-            "You are an incident response researcher. Given an incident description:\n"
-            "1. Search the runbook index for relevant procedures\n"
-            "2. Extract the specific remediation steps\n"
-            "3. Identify any prerequisites or dependencies for the fix\n"
-            "4. Note any known past incidents of the same type\n\n"
-            "Return: recommended runbook title, step-by-step remediation, "
-            "estimated resolution time, and escalation path."
-        ),
-        tools=[tool.definitions],
-    )
-    agent = ai_client.agents.create_version(definition=agent_def)
-    return agent.id
-
-
-def create_communicator_agent() -> str:
-    agent_def = PromptAgentDefinition(
-        model="gpt-4.1",
-        name="incident-communicator",
-        instructions=(
-            "You are an incident communications specialist. Given diagnostic findings "
-            "and runbook recommendations, draft a clear stakeholder update.\n\n"
-            "Format:\n"
-            "## Incident Update — [Severity] — [Short title]\n"
-            "**Status:** [Investigating / Identified / Mitigating / Resolved]\n"
-            "**Impact:** [What is affected and how many users]\n"
-            "**What we know:** [2-3 sentences of root cause]\n"
-            "**What we're doing:** [Numbered remediation steps in progress]\n"
-            "**ETA:** [Estimated resolution time]\n"
-            "**Next update:** [When to expect next communication]\n\n"
-            "Write at a business level — no jargon, no stack traces, no blame."
-        ),
-    )
-    agent = ai_client.agents.create_version(definition=agent_def)
-    return agent.id
+COMMUNICATOR = (
+    "You are an incident communications specialist. Given diagnostic findings "
+    "and runbook recommendations, draft a clear stakeholder update.\n\n"
+    "Format:\n"
+    "## Incident Update — [Severity] — [Short title]\n"
+    "**Status:** [Investigating / Identified / Mitigating / Resolved]\n"
+    "**Impact:** [What is affected and how many users]\n"
+    "**What we know:** [2-3 sentences of root cause]\n"
+    "**What we're doing:** [Numbered remediation steps in progress]\n"
+    "**ETA:** [Estimated resolution time]\n"
+    "**Next update:** [When to expect next communication]\n\n"
+    "Write at a business level — no jargon, no stack traces, no blame."
+)
+COMMUNICATOR_TOOLS = []
 ```
 
-### Step 4 — Agent runner with tool call handling
+### Step 4 — Agent runner with tool-call handling
 
 ```python
-from azure.ai.projects.models import SubmitToolOutputsAction
-import time
-
 TOOL_HANDLERS = {
     "query_app_insights": query_app_insights,
-    "search_runbooks": search_runbooks
+    "search_runbooks": search_runbooks,
 }
 
-def run_agent(agent_id: str, message: str) -> str:
-    """Run an agent to completion, handling tool calls. Returns final text."""
-    thread = ai_client.agents.create_thread()
-    ai_client.agents.create_message(
-        thread_id=thread.id,
-        role=MessageRole.USER,
-        content=message
-    )
-    run = ai_client.agents.create_run(
-        thread_id=thread.id,
-        agent_id=agent_id
-    )
-
-    while run.status in ("queued", "in_progress", "requires_action"):
-        time.sleep(1)
-        run = ai_client.agents.get_run(thread_id=thread.id, run_id=run.id)
-
-        if run.status == "requires_action":
-            action = run.required_action
-            if isinstance(action, SubmitToolOutputsAction):
-                outputs = []
-                for call in action.submit_tool_outputs.tool_calls:
-                    fn_name = call.function.name
-                    fn_args = json.loads(call.function.arguments)
-                    handler = TOOL_HANDLERS.get(fn_name)
-                    result = handler(**fn_args) if handler else json.dumps({"error": f"Unknown function: {fn_name}"})
-                    outputs.append({"tool_call_id": call.id, "output": result})
-                run = ai_client.agents.submit_tool_outputs_to_run(
-                    thread_id=thread.id,
-                    run_id=run.id,
-                    tool_outputs=outputs
-                )
-
-    if run.status != "completed":
-        raise RuntimeError(f"Agent {agent_id} failed: {run.status}")
-
-    messages = ai_client.agents.list_messages(thread_id=thread.id)
-    return messages.get_last_message_by_role(MessageRole.ASSISTANT).content[0].text.value
+def run_agent(instructions: str, tools: list, message: str) -> str:
+    """Run one agent's tool-calling loop to completion; return its final text."""
+    messages = [
+        {"role": "system", "content": instructions},
+        {"role": "user", "content": message},
+    ]
+    for _ in range(8):  # safety cap on tool rounds
+        resp = openai.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=tools or None,
+            tool_choice="auto" if tools else None,
+        )
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            return msg.content or ""
+        messages.append(msg)
+        for call in msg.tool_calls:
+            handler = TOOL_HANDLERS.get(call.function.name)
+            args = json.loads(call.function.arguments or "{}")
+            result = handler(**args) if handler else json.dumps(
+                {"error": f"Unknown function: {call.function.name}"})
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+    return msg.content or ""
 ```
 
 ### Step 5 — Orchestrate with concurrent fan-out
 
 ```python
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
-def respond_to_incident(
-    incident_description: str,
-    diagnostician_id: str,
-    researcher_id: str,
-    communicator_id: str
-) -> dict:
+def respond_to_incident(incident_description: str) -> dict:
     """Fan-out to diagnostician and researcher, fan-in to communicator."""
 
     print("Running diagnostician and researcher in parallel...")
     with ThreadPoolExecutor(max_workers=2) as executor:
         diag_future = executor.submit(
-            run_agent, diagnostician_id, incident_description
-        )
+            run_agent, DIAGNOSTICIAN, DIAGNOSTICIAN_TOOLS, incident_description)
         research_future = executor.submit(
-            run_agent, researcher_id, incident_description
-        )
+            run_agent, RESEARCHER, RESEARCHER_TOOLS, incident_description)
 
         diagnostic_report = diag_future.result()
         runbook_recommendation = research_future.result()
@@ -324,12 +326,12 @@ def respond_to_incident(
         f"Diagnostic findings:\n{diagnostic_report}\n\n"
         f"Runbook recommendations:\n{runbook_recommendation}"
     )
-    stakeholder_update = run_agent(communicator_id, communicator_input)
+    stakeholder_update = run_agent(COMMUNICATOR, COMMUNICATOR_TOOLS, communicator_input)
 
     return {
         "diagnostic_report": diagnostic_report,
         "runbook_recommendation": runbook_recommendation,
-        "stakeholder_update": stakeholder_update
+        "stakeholder_update": stakeholder_update,
     }
 ```
 
@@ -337,14 +339,9 @@ def respond_to_incident(
 
 ```python
 def main():
-    print("Creating agents...")
-    diag_id = create_diagnostician_agent()
-    research_id = create_researcher_agent()
-    comm_id = create_communicator_agent()
-
     # Sample incident
     incident = """
-    INCIDENT P1 — 2024-03-15 14:32 UTC
+    INCIDENT P1 — 2026-06-25 14:32 UTC
     Service: payment-api (production)
     Alert: Error rate exceeded 15% (threshold: 2%)
     Symptom: Customers reporting "Payment failed" errors on checkout
@@ -353,7 +350,7 @@ def main():
     """
 
     print("Responding to incident...")
-    results = respond_to_incident(incident, diag_id, research_id, comm_id)
+    results = respond_to_incident(incident)
 
     print("\n" + "="*60)
     print("STAKEHOLDER UPDATE:")
@@ -381,7 +378,7 @@ time python incident_responder.py
 With parallel fan-out, diagnostician + researcher run simultaneously. Expect total time ~30-45 seconds vs ~60-80 seconds sequential.
 
 Verify:
-- Diagnostician made at least one `query_app_insights` call (check run steps)
+- Diagnostician issued at least one `query_app_insights` tool call (add a `print` inside the tool to watch it fire)
 - Researcher found and cited relevant runbooks
 - Communicator output has no technical jargon
 
@@ -389,9 +386,10 @@ Verify:
 
 ## Common Mistakes
 
+- **Reaching for the old Assistants `agents` API.** `azure-ai-projects` 2.x removed the threads/runs Assistants surface — `AIProjectClient` has no `.agents`, and `FunctionTool`/`PromptAgentDefinition`/`MessageRole`/`SubmitToolOutputsAction` aren't importable. Drive each agent with `openai.chat.completions.create(..., tools=[...])` and a tool-call loop, as shown above.
 - **Thread pool size too small.** With 3+ agents, use `max_workers` equal to the number of parallel agents.
-- **Tool function returns unserializable objects.** All tool returns must be strings (JSON-encoded). Never return raw Python objects.
-- **Agent IDs hardcoded.** Create agents once and store IDs in environment variables or Key Vault. Re-creating agents on every incident wastes time and quota.
+- **Tool function returns unserializable objects.** All tool returns must be strings (JSON-encoded) — `query_app_insights` uses `json.dumps(..., default=str)` because KQL rows can contain datetimes.
+- **AI Search rejects your token.** Data-plane AAD must be enabled on the service (`az search service update --auth-options aadOrApiKey`) and your identity needs **Search Index Data Reader**; otherwise you'll get 403s.
 
 ---
 

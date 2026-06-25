@@ -12,14 +12,34 @@ A two-stage Python pipeline. Stage one sends an MP3 or WAV file to Whisper via F
 
 ## Prerequisites
 
-- Microsoft Foundry project (hub + project at [https://ai.azure.com](https://ai.azure.com))
+- An **Azure AI Services / Foundry resource** (kind `AIServices`, SKU `S0`) with **two model deployments**: `whisper` (transcription) and `gpt-4.1-mini` (extraction). Create the resource and deployments via CLI:
+  ```bash
+  # Resource (skip if you already have one)
+  az cognitiveservices account create \
+    --name <your-resource-name> --resource-group <your-rg> \
+    --kind AIServices --sku S0 --location eastus2 --custom-domain <your-resource-name> --yes
+
+  # Whisper deployment (deployment name must be 'whisper' to match the script)
+  az cognitiveservices account deployment create \
+    --name <your-resource-name> --resource-group <your-rg> \
+    --deployment-name whisper --model-name whisper --model-version 001 \
+    --model-format OpenAI --sku-name Standard --sku-capacity 3
+
+  # gpt-4.1-mini deployment
+  az cognitiveservices account deployment create \
+    --name <your-resource-name> --resource-group <your-rg> \
+    --deployment-name gpt-4.1-mini --model-name gpt-4.1-mini --model-version 2025-04-14 \
+    --model-format OpenAI --sku-name Standard --sku-capacity 10
+  ```
+  > Whisper isn't in every region — `eastus2`, `northcentralus`, `swedencentral`, and `westeurope` all have it. Deploy **both** models on the **same** resource. Confirm versions for your region with `az cognitiveservices account list-models --name <name> --resource-group <rg> -o table`.
+- Azure CLI logged in (`az login`) with **Cognitive Services OpenAI Contributor** on the resource.
 - Python 3.11+
-- `azure-ai-projects >= 1.0.0`, `azure-identity`, `openai >= 1.30.0`
-- An MP3 or WAV file to test with (any meeting recording, or use the sample at the end)
-- Azure CLI logged in
+- `openai >= 1.30.0`, `azure-identity`, `python-dotenv`
+- `AZURE_OPENAI_ENDPOINT` set in `.env` to your resource endpoint (`https://<your-resource-name>.cognitiveservices.azure.com/`)
+- An MP3 or WAV file to test with (any meeting recording, or use the sample transcript in [Test It](#test-it))
 
 ```bash
-pip install azure-ai-projects azure-identity openai python-dotenv
+pip install "openai>=1.30.0" azure-identity python-dotenv
 ```
 
 ---
@@ -31,7 +51,7 @@ Audio file (MP3/WAV)
         │
         ▼
 Foundry Whisper endpoint
-  (client.audio.transcriptions.create)
+  (openai.audio.transcriptions.create)
         │
         ▼
 Raw transcript (plain text)
@@ -51,23 +71,29 @@ Structured JSON output:
 
 ### Step 1 — Set up client
 
+Whisper transcription and chat extraction both run through a single `AzureOpenAI` client pointed at your Foundry resource's Azure OpenAI endpoint, authenticated with `DefaultAzureCredential` (no API keys).
+
 ```python
 import os
 import json
 from dotenv import load_dotenv
-from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 
 load_dotenv()
 
-PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
-client = AIProjectClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential()
+ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]  # https://<resource>.cognitiveservices.azure.com/
+token_provider = get_bearer_token_provider(
+    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
 )
-# Get an OpenAI-compatible client scoped to this Foundry project
-openai = client.get_openai_client()
+openai = AzureOpenAI(
+    azure_endpoint=ENDPOINT,
+    azure_ad_token_provider=token_provider,
+    api_version="2025-04-01-preview",
+)
 ```
+
+> **Why not the Foundry project client?** `AIProjectClient.get_openai_client()` routes to the project's `/openai/v1/` surface, which serves chat completions but **returns 404 for Whisper audio transcription**. The Azure OpenAI endpoint above serves both audio and chat, so one client covers the whole pipeline. (Structured outputs with `strict: true` require api-version `2024-08-01-preview` or later — `2025-04-01-preview` is used here.)
 
 ### Step 2 — Transcribe the audio
 
@@ -214,7 +240,7 @@ def save_minutes(minutes: dict, output_dir: str = "outputs") -> str:
 
     # Save raw JSON
     json_path = f"{output_dir}/minutes_{ts}.json"
-    with open(json_path, "w") as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(minutes, f, indent=2)
 
     # Generate readable markdown
@@ -239,7 +265,7 @@ def save_minutes(minutes: dict, output_dir: str = "outputs") -> str:
         md_lines.append(f"- {decision}")
 
     md_path = f"{output_dir}/minutes_{ts}.md"
-    with open(md_path, "w") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(md_lines))
 
     print(f"Saved: {json_path}\nSaved: {md_path}")
@@ -351,5 +377,5 @@ Expected output structure:
 
 - [Whisper via Azure AI Foundry](https://learn.microsoft.com/azure/ai-foundry/openai/whisper-quickstart)
 - [Structured outputs (JSON Schema)](https://learn.microsoft.com/azure/ai-foundry/openai/how-to/structured-outputs)
-- [azure-ai-projects get_openai_client](https://learn.microsoft.com/python/api/azure-ai-projects/azure.ai.projects.aio.aiprojectclient)
+- [Keyless auth with DefaultAzureCredential](https://learn.microsoft.com/azure/ai-services/openai/how-to/managed-identity)
 - [pydub audio splitting](https://github.com/jiaaro/pydub)

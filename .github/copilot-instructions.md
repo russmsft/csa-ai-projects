@@ -1,6 +1,6 @@
 # Copilot Instructions
 
-This is a CSA onboarding portfolio — 12 AI project ideas with step-by-step how-to guides for new Microsoft Cloud Solution Architects. All projects use **Microsoft Foundry** as the AI platform (not standalone Azure OpenAI resources).
+This is a portfolio of AI projects for Microsoft Cloud Solution Architects — 12 AI project ideas with step-by-step how-to guides to build AI skills, demo capabilities to customers, and kick-start co-build POCs. All projects use **Microsoft Foundry** as the AI platform (not standalone Azure OpenAI resources).
 
 ## Repository Structure
 
@@ -52,7 +52,7 @@ Each guide in `docs/how-to/` follows this structure:
 
 ## Writing Style
 
-- Write for CSAs with strong cloud backgrounds who are new to Azure AI — explain AI concepts, skip Azure basics.
+- Write for CSAs with strong cloud backgrounds building depth in Azure AI — explain AI concepts, skip Azure basics.
 - Every guide should produce something demo-ready — not just theory.
 - Include full CLI commands for Azure resource setup (don't assume portal-only).
 - Call out cost implications and cleanup steps for demo resources.

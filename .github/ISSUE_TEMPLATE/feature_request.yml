@@ -7,7 +7,7 @@ body:
     id: outcome
     attributes:
       label: Desired outcome
-      description: What should a new CSA be able to do after this change?
+      description: What should a CSA be able to do after this change?
     validations:
       required: true
   - type: textarea

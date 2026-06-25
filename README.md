@@ -1,8 +1,8 @@
-# CSA Onboarding AI Projects
+# AI Projects for Cloud Solution Architects
 
-A curated portfolio of **12 AI project ideas** — each with a step-by-step build guide — for new Cloud Solution Architects at Microsoft CSU Cloud & AI. Everything runs on **Microsoft Foundry** (not standalone Azure OpenAI, not third-party).
+A curated portfolio of **12 AI project ideas** — each with a step-by-step build guide — for Cloud Solution Architects at Microsoft CSU Cloud & AI. Build them to **sharpen your AI skills**, **show customers what's possible**, and **kick-start co-build POCs**. Everything runs on **Microsoft Foundry** (not standalone Azure OpenAI, not third-party).
 
-You just joined CSU. You know cloud. You don't know AI yet. These projects are ramp-up exercises that double as customer-ready demos — so by the time a customer asks *"so what can this actually do?"*, you have a working answer on your laptop, not a slide.
+You know cloud. These projects build your fluency with the AI stack and leave you with working demos on your laptop — not slides. So when a customer asks *"so what can this actually do?"*, you show them.
 
 ---
 
@@ -22,22 +22,23 @@ Each project below links directly to its how-to guide — **the project descript
 
 ## Who This Is For
 
-New CSAs with solid cloud/dev backgrounds who are new to Azure AI and Microsoft Foundry. Every idea serves one of two purposes:
+Cloud Solution Architects with solid cloud/dev backgrounds who want hands-on depth with Azure AI and Microsoft Foundry. Every project serves up to three purposes:
 
-- **Demo asset** — something you build once and pull up in every customer meeting.
+- **Learn** — build real fluency with a specific Foundry capability by shipping working code.
+- **Demo asset** — something you build once and pull up in any customer meeting.
 - **Co-build template** — a POC starter you clone, swap in a customer's data, and deploy in a sprint.
 
 ---
 
 ## Get Started
 
-You need two things in your first 90 days: confidence you can actually build on the AI stack, and something real to show a customer. Slides won't get you there. A working demo will.
+Being effective with AI customers takes two things: confidence you can actually build on the stack, and something real to show. Slides won't get you there. A working demo will.
 
 1. **Set up your environment** (see [Prerequisites](#prerequisites) below).
-2. **Build [01 — Ask My Docs](docs/how-to/01-ask-my-docs.md) today.** It's runnable code already in this repo — RAG over your documents in an afternoon.
-3. **Then follow the [phased roadmap](#phased-roadmap).** It tells you what order to tackle the rest.
+2. **Build [01 — Ask My Docs](docs/how-to/01-ask-my-docs.md) first.** It's runnable code already in this repo — RAG over your documents in an afternoon.
+3. **Then follow the [build order](#suggested-build-order).** It tells you what order to tackle the rest.
 
-> Build the first three this month. Not next month. This month.
+> Start with the first three. The best demo is the one you've actually built, broken, and fixed.
 
 ### Prerequisites
 
@@ -230,9 +231,11 @@ The hardest build here, and the highest-value demo for manufacturing. Production
 
 ---
 
-## Phased Roadmap
+## Suggested Build Order
 
-### Phase 1: First 90 Days — Get Your Hands Dirty
+A difficulty-ordered path through the portfolio. The week numbers are a suggested cadence, not a deadline — go at your own pace.
+
+### Phase 1: Foundations — Get Your Hands Dirty
 
 | Week | Build | Why |
 |------|-------|-----|
@@ -243,9 +246,9 @@ The hardest build here, and the highest-value demo for manufacturing. Production
 | 7–10 | [Multi-Agent Incident Responder](docs/how-to/06-multi-agent-incident-responder.md) | Multi-agent orchestration. The project where everything clicks. |
 | 11–12 | Polish + customize | Swap in customer-relevant data. Rehearse the storytelling. |
 
-**By day 90:** 4–5 working demos, comfort with Foundry Agent Service, ability to spin up a customer POC in a week.
+**After Phase 1:** 4–5 working demos, comfort with Foundry Agent Service, and the ability to spin up a customer POC in a week.
 
-### Phase 2: Months 3–9 — Co-Build with Real Customers
+### Phase 2: Co-Build with Real Customers
 
 Pick 2–3 based on who you're actually working with:
 
@@ -256,13 +259,13 @@ Pick 2–3 based on who you're actually working with:
 
 Each teaches a different skill: long-context reasoning, event-driven agents, voice APIs, web grounding. Let your customer conversations guide the choice.
 
-### Phase 3: Months 9–18 — The Hard Stuff
+### Phase 3: The Hard Stuff
 
 - [Agentic Workflow for Approvals](docs/how-to/10-agentic-approval-workflow.md) — enterprise workflow automation, human-in-the-loop
 - [Computer-Use Process Automator](docs/how-to/11-computer-use-automator.md) — bleeding edge, high wow factor
 - [Multi-Modal Quality Inspector](docs/how-to/12-multimodal-quality-inspector.md) — deep industry play, complex architecture
 
-These turn you from "the new CSA" into "the person I call when we need someone who's done this before."
+These turn you into the person teammates call when they need someone who's done this before.
 
 ---
 
@@ -349,4 +352,4 @@ If you change the project list, ordering, models, or roadmap, update this README
 
 ---
 
-*CSU Cloud & AI onboarding — May 2026. All projects run on Microsoft Foundry.*
+*CSU Cloud & AI — May 2026. All projects run on Microsoft Foundry.*

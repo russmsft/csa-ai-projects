@@ -2,13 +2,13 @@
 
 ## Project Overview
 
-This repository is a CSA onboarding portfolio for Microsoft Foundry projects. It combines:
+This repository is a portfolio of AI projects for Cloud Solution Architects, built on Microsoft Foundry. It combines:
 
 - A master portfolio in `README.md` (the landing page)
 - Twelve numbered how-to guides in `docs/how-to/`
 - A small Python demo in `src/` for the Ask My Docs RAG pattern
 
-The audience is new Cloud Solution Architects with solid cloud experience who are learning Azure AI and Microsoft Foundry. Contributions should reduce ramp-up friction and keep every project idea demo-ready.
+The audience is Cloud Solution Architects with solid cloud experience building hands-on depth in Azure AI and Microsoft Foundry. Contributions should lower the barrier to building and keep every project idea demo-ready.
 
 ## Repository Structure
 

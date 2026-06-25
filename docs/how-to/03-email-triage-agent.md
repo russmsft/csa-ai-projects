@@ -12,14 +12,25 @@ An Azure Functions-triggered pipeline with three stages: GPT-4.1-mini classifies
 
 ## Prerequisites
 
-- Microsoft Foundry project with GPT-4.1-mini and GPT-5.4-mini deployed
-- Azure Service Bus namespace with three queues: `incoming-email`, `billing-team`, `technical-team`, `general-team`
+- An **Azure AI Services / Foundry resource** with `gpt-4.1-mini` and `gpt-5.4-mini` deployments:
+  ```bash
+  az cognitiveservices account deployment create --name <res> --resource-group <rg> \
+    --deployment-name gpt-4.1-mini --model-name gpt-4.1-mini --model-version 2025-04-14 \
+    --model-format OpenAI --sku-name Standard --sku-capacity 10
+  az cognitiveservices account deployment create --name <res> --resource-group <rg> \
+    --deployment-name gpt-5.4-mini --model-name gpt-5.4-mini --model-version 2026-03-17 \
+    --model-format OpenAI --sku-name GlobalStandard --sku-capacity 10
+  ```
+- An **Azure Service Bus namespace** (Standard) with **four** queues: `incoming-email`, `billing-team`, `technical-team`, `general-team` (created in Step 1).
+- Azure CLI logged in with **Cognitive Services OpenAI Contributor** on the resource and **Azure Service Bus Data Owner** on the namespace. This demo uses **Entra ID auth, not SAS connection strings** — many enterprise tenants disable local/SAS auth (`disableLocalAuth=true`) by policy, which makes connection-string auth fail.
+- `AZURE_OPENAI_ENDPOINT` and `SERVICE_BUS_NAMESPACE` (the `<namespace>.servicebus.windows.net` host) set in `.env`.
 - Python 3.11+
-- `azure-ai-projects`, `azure-servicebus`, `azure-identity`, `azure-functions`
 
 ```bash
-pip install azure-ai-projects azure-identity azure-servicebus azure-functions python-dotenv
+pip install "openai>=1.30.0" azure-identity azure-servicebus websocket-client azure-functions python-dotenv
 ```
+
+> **Why `websocket-client`?** Many corporate networks block the default AMQP port (5671). The Service Bus client below uses AMQP-over-WebSockets (443), which requires this package.
 
 ---
 
@@ -74,35 +85,47 @@ for queue in incoming-email billing-team technical-team general-team; do
     --resource-group $RG
 done
 
-# Get connection string for local dev
-az servicebus namespace authorization-rule keys list \
-  --namespace-name $NAMESPACE \
-  --resource-group $RG \
-  --name RootManageSharedAccessKey \
-  --query primaryConnectionString -o tsv
+# Grant yourself data-plane access via Entra ID (SAS keys are often disabled by policy)
+az role assignment create \
+  --assignee $(az ad signed-in-user show --query id -o tsv) \
+  --role "Azure Service Bus Data Owner" \
+  --scope $(az servicebus namespace show --name $NAMESPACE --resource-group $RG --query id -o tsv)
+
+# Your SERVICE_BUS_NAMESPACE value is the namespace host:
+echo "$NAMESPACE.servicebus.windows.net"
 ```
 
 ### Step 2 — Client setup
+
+Both models run through a single `AzureOpenAI` client (Whisper-style routing isn't needed here, and the Foundry project client adds no value for chat). Service Bus uses the same `DefaultAzureCredential` — no connection strings.
 
 ```python
 import os
 import json
 from dotenv import load_dotenv
-from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
-from azure.servicebus import ServiceBusClient, ServiceBusMessage
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
+from azure.servicebus import ServiceBusClient, ServiceBusMessage, TransportType
 
 load_dotenv()
 
-PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
-SB_CONN_STR = os.environ["SERVICE_BUS_CONNECTION_STRING"]
+ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]       # https://<resource>.cognitiveservices.azure.com/
+SB_NAMESPACE = os.environ["SERVICE_BUS_NAMESPACE"]   # <namespace>.servicebus.windows.net
 
-ai_client = AIProjectClient(
-    endpoint=PROJECT_ENDPOINT,
-    credential=DefaultAzureCredential()
+credential = DefaultAzureCredential()
+openai = AzureOpenAI(
+    azure_endpoint=ENDPOINT,
+    azure_ad_token_provider=get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"
+    ),
+    api_version="2025-04-01-preview",
 )
-openai = ai_client.get_openai_client()
-sb_client = ServiceBusClient.from_connection_string(SB_CONN_STR)
+# Entra ID auth for Service Bus (no connection strings / SAS keys)
+sb_client = ServiceBusClient(
+    fully_qualified_namespace=SB_NAMESPACE,
+    credential=credential,
+    transport_type=TransportType.AmqpOverWebsocket,
+)
 ```
 
 ### Step 3 — Stage 1: Classification
@@ -166,15 +189,11 @@ def classify_email(subject: str, body: str) -> dict:
     return json.loads(response.choices[0].message.content)
 ```
 
-### Step 4 — Stage 2: Response drafting with FunctionTool
+### Step 4 — Stage 2: The routing tool
 
-Define the routing function. Foundry's `FunctionTool` calls this when the agent decides to route:
+Expose the router to the model as a function tool. We use a standard chat completion with `tools=[...]` — not the legacy Assistants threads/runs API, which is no longer part of `azure-ai-projects`. When the model decides where to route, it emits a `route_email` tool call that we execute, actually sending the enriched message to the target Service Bus queue.
 
 ```python
-from azure.ai.projects.models import FunctionTool, PromptAgentDefinition
-
-# --- Function definitions for the agent ---
-
 ROUTE_FUNCTION = {
     "name": "route_email",
     "description": (
@@ -203,9 +222,12 @@ ROUTE_FUNCTION = {
     }
 }
 
-def route_email(target_queue: str, priority: str, assignee_hint: str = "") -> str:
-    """Actually send the message to the Service Bus queue."""
-    # This runs locally — the agent calls this via the tool mechanism
+def route_email(target_queue: str, priority: str,
+                assignee_hint: str = "", payload: dict | None = None) -> str:
+    """Send the enriched message to the target Service Bus queue and return a receipt."""
+    if payload is not None:
+        with sb_client.get_queue_sender(target_queue) as sender:
+            sender.send_messages(ServiceBusMessage(json.dumps(payload)))
     return json.dumps({
         "status": "queued",
         "queue": target_queue,
@@ -214,112 +236,87 @@ def route_email(target_queue: str, priority: str, assignee_hint: str = "") -> st
     })
 ```
 
-### Step 5 — Create the response-drafting agent
+### Step 5 — Define the knowledge base and triage prompt
+
+No persistent agent registration is needed — the model, the tool, and the prompt are all it takes.
 
 ```python
+TRIAGE_TOOLS = [{"type": "function", "function": ROUTE_FUNCTION}]
+
 KNOWLEDGE_BASE = """
 Common responses:
-- Billing issues: "Our billing team reviews invoices within 2 business days. For urgent 
+- Billing issues: "Our billing team reviews invoices within 2 business days. For urgent
   billing disputes, please reference your invoice number."
-- Technical outages: "Our SRE team is notified immediately for P1 issues. 
+- Technical outages: "Our SRE team is notified immediately for P1 issues.
   Expected response time is 30 minutes."
 - Password resets: "Use the self-service portal at https://aka.ms/resetpw"
 - General inquiries: "Our support team responds within 1 business day."
 """
 
-def create_triage_agent() -> str:
-    """Create the agent that drafts responses and routes emails."""
-    function_tool = FunctionTool(functions=[ROUTE_FUNCTION])
-
-    agent_def = PromptAgentDefinition(
-        model="gpt-5.4-mini",      # fast reasoning for response quality
-        name="email-triage-agent",
-        instructions=(
-            "You are a customer support triage agent. Given an email and its classification, "
-            "draft a professional, empathetic response (3-4 sentences max). "
-            "Then call route_email() to route to the correct team.\n\n"
-            f"Knowledge base:\n{KNOWLEDGE_BASE}"
-        ),
-        tools=[function_tool.definitions],
-    )
-    agent = ai_client.agents.create_version(definition=agent_def)
-    return agent.id
+TRIAGE_SYSTEM = (
+    "You are a customer support triage agent. Given an email and its classification, "
+    "draft a professional, empathetic response (3-4 sentences max). "
+    "Then call route_email() to route to the correct team.\n\n"
+    f"Knowledge base:\n{KNOWLEDGE_BASE}"
+)
 ```
 
 ### Step 6 — Full processing pipeline
 
+Classify, then run one chat completion with the routing tool. If the model emits a `route_email` call, execute it (sending to Service Bus) and feed the result back so the model can finalize its draft — the standard tool-calling loop.
+
 ```python
-from azure.ai.projects.models import MessageRole, SubmitToolOutputsAction
-
-def process_email(
-    agent_id: str,
-    email_id: str,
-    subject: str,
-    body: str,
-    sender: str
-) -> dict:
+def process_email(email_id: str, subject: str, body: str, sender: str) -> dict:
     """Full pipeline: classify → draft → route."""
-
     # Stage 1: classify
     classification = classify_email(subject, body)
     print(f"  Classified: {classification['category']} / {classification['urgency']}")
 
-    # Stage 2 & 3: draft + route via agent
-    thread = ai_client.agents.create_thread()
-    ai_client.agents.create_message(
-        thread_id=thread.id,
-        role=MessageRole.USER,
-        content=(
-            f"Process this customer email:\n\n"
+    # Stage 2 & 3: draft + route via a tool-calling chat completion
+    messages = [
+        {"role": "system", "content": TRIAGE_SYSTEM},
+        {"role": "user", "content": (
             f"From: {sender}\nSubject: {subject}\nBody:\n{body}\n\n"
             f"Classification: {json.dumps(classification)}\n\n"
             "Draft a response and route this email to the correct team."
+        )},
+    ]
+
+    resp = openai.chat.completions.create(
+        model="gpt-5.4-mini",
+        messages=messages,
+        tools=TRIAGE_TOOLS,
+        tool_choice="auto",
+    )
+    msg = resp.choices[0].message
+    draft = msg.content or ""
+    routing = {}
+
+    if msg.tool_calls:
+        messages.append(msg)
+        for call in msg.tool_calls:
+            if call.function.name == "route_email":
+                args = json.loads(call.function.arguments)
+                enriched = {
+                    "email_id": email_id, "from": sender, "subject": subject,
+                    "classification": classification, "routing": args,
+                }
+                routing = json.loads(route_email(**args, payload=enriched))
+                messages.append({
+                    "role": "tool", "tool_call_id": call.id,
+                    "content": json.dumps(routing),
+                })
+        # Follow-up call so the model can finalize the draft after routing
+        follow = openai.chat.completions.create(
+            model="gpt-5.4-mini", messages=messages, tools=TRIAGE_TOOLS,
         )
-    )
-
-    # Run with tool call handling
-    run = ai_client.agents.create_run(
-        thread_id=thread.id,
-        agent_id=agent_id
-    )
-
-    # Poll and handle tool calls
-    route_result = {}
-    while run.status in ("queued", "in_progress", "requires_action"):
-        run = ai_client.agents.get_run(thread_id=thread.id, run_id=run.id)
-
-        if run.status == "requires_action":
-            action = run.required_action
-            if isinstance(action, SubmitToolOutputsAction):
-                tool_outputs = []
-                for call in action.submit_tool_outputs.tool_calls:
-                    if call.function.name == "route_email":
-                        args = json.loads(call.function.arguments)
-                        result = route_email(**args)
-                        route_result = json.loads(result)
-                        tool_outputs.append({
-                            "tool_call_id": call.id,
-                            "output": result
-                        })
-                run = ai_client.agents.submit_tool_outputs_to_run(
-                    thread_id=thread.id,
-                    run_id=run.id,
-                    tool_outputs=tool_outputs
-                )
-
-    if run.status != "completed":
-        raise RuntimeError(f"Run failed: {run.status} — {run.last_error}")
-
-    messages = ai_client.agents.list_messages(thread_id=thread.id)
-    draft_response = messages.get_last_message_by_role(
-        MessageRole.ASSISTANT
-    ).content[0].text.value
+        draft = follow.choices[0].message.content or draft
 
     return {
         "email_id": email_id,
         "classification": classification,
-        "draft_response": draft_response,
-        "routing": route_result
+        "draft_response": draft,
+        "routing": routing,
     }
 ```
 
@@ -336,17 +333,13 @@ app = func.FunctionApp()
 @app.service_bus_queue_trigger(
     arg_name="msg",
     queue_name="incoming-email",
-    connection="SERVICE_BUS_CONNECTION_STRING"
+    connection="ServiceBusConnection"
 )
 def triage_email_trigger(msg: func.ServiceBusMessage):
     payload = json.loads(msg.get_body().decode())
     logging.info(f"Processing email: {payload.get('subject', 'no subject')}")
 
-    # agent_id should be stored in app config or environment
-    AGENT_ID = os.environ["TRIAGE_AGENT_ID"]
-
     result = process_email(
-        agent_id=AGENT_ID,
         email_id=payload.get("id", "unknown"),
         subject=payload.get("subject", ""),
         body=payload.get("body", ""),
@@ -354,6 +347,8 @@ def triage_email_trigger(msg: func.ServiceBusMessage):
     )
     logging.info(f"Processed: {json.dumps(result, indent=2)}")
 ```
+
+> **Identity-based trigger:** With SAS disabled, configure the trigger for a managed-identity connection. Set the app setting `ServiceBusConnection__fullyQualifiedNamespace = <namespace>.servicebus.windows.net` and grant the Function App's managed identity **Azure Service Bus Data Receiver** on the namespace — no connection strings.
 
 ---
 
@@ -382,12 +377,12 @@ def send_test_email():
 send_test_email()
 ```
 
-Expected classification output:
+Expected classification output (a payment *system outage* is a P1 technical incident, so it routes to `technical-team`):
 ```json
 {
   "urgency": "high",
-  "category": "billing",
-  "reasoning": "Payment system outage causing financial loss — P1 incident.",
+  "category": "technical",
+  "reasoning": "Payment processing system outage causing financial loss — P1 incident.",
   "sentiment": "frustrated"
 }
 ```
@@ -396,7 +391,8 @@ Expected classification output:
 
 ## Common Mistakes
 
-- **Tool call loop never resolves.** If `route_email` isn't registered correctly, the run stays in `requires_action` forever. Always validate function name matches exactly between `ROUTE_FUNCTION["name"]` and your handler.
+- **Service Bus auth fails with `ServiceBusAuthenticationError`.** Enterprise tenants often disable SAS keys (`disableLocalAuth=true`), so connection-string auth is rejected. Use `DefaultAzureCredential` with the **Azure Service Bus Data Owner** role (as shown), and AMQP-over-WebSockets if port 5671 is blocked.
+- **Tool call never fires.** If the model returns a draft but no `route_email` call, tighten the system prompt ("you MUST call route_email") or force it with `tool_choice={"type": "function", "function": {"name": "route_email"}}`. Always validate the function name matches exactly between `ROUTE_FUNCTION["name"]` and your handler.
 - **Service Bus message ordering.** Standard tier doesn't guarantee order. If you need FIFO for high-urgency emails, use Premium tier with sessions.
 - **Draft responses leaking PII.** Add a PII scan step between drafting and routing using Azure AI Language's `RecognizePiiEntities` before sending to downstream teams.
 

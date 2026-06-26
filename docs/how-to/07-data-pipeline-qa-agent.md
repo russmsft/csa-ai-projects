@@ -12,15 +12,17 @@ An Azure Function triggered by an Event Grid pipeline-completion event. The func
 
 ## Prerequisites
 
-- Microsoft Foundry project with GPT-4.1-mini deployed
-- Azure Data Factory or Synapse pipeline (as the event source)
+- Microsoft Foundry / Azure AI Services resource with a **`gpt-4.1-mini`** deployment (the code calls the model by this deployment name)
+- Azure Data Factory or Synapse pipeline (as the event source) — optional for a local demo; `test_qa_locally()` simulates the event without one
 - Azure Event Grid subscription on the pipeline completion event
 - Azure Storage Account for baseline stats history
-- Python 3.11+, `azure-functions`, `azure-ai-projects`, `azure-storage-blob`
+- Azure CLI logged in (`az login`) with **Cognitive Services OpenAI User** on the AI Services resource and **Storage Blob Data Contributor** on the storage account — this demo uses **Entra ID auth, not keys**
+- `AZURE_OPENAI_ENDPOINT` and `STORAGE_ACCOUNT` set in the environment (or `.env`)
+- Python 3.11+, `azure-functions`, `openai`, `azure-storage-blob`
 
 ```bash
-pip install azure-ai-projects azure-identity azure-functions \
-  azure-storage-blob azure-eventgrid python-dotenv
+pip install "openai>=1.30.0" azure-identity azure-functions \
+  azure-storage-blob python-dotenv
 ```
 
 ---
@@ -60,8 +62,8 @@ import logging
 from datetime import datetime, timezone
 import azure.functions as func
 from azure.storage.blob import BlobServiceClient
-from azure.identity import DefaultAzureCredential
-from azure.ai.projects import AIProjectClient
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 
 app = func.FunctionApp()
 logger = logging.getLogger(__name__)
@@ -71,10 +73,16 @@ blob_client = BlobServiceClient(
     account_url=f"https://{os.environ['STORAGE_ACCOUNT']}.blob.core.windows.net",
     credential=credential
 )
-ai_client = AIProjectClient(
-    endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
-    credential=credential
+# One Responses-API client drives the QA agent (Code Interpreter + function
+# calling). azure-ai-projects 2.x removed the Assistants threads/runs surface;
+# the Responses API replaces it and needs no separate agent registration.
+client = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    azure_ad_token_provider=get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"),
+    api_version="2025-04-01-preview",
 )
+MODEL = os.environ.get("QA_MODEL", "gpt-4.1-mini")
 
 
 @app.event_grid_trigger(arg_name="event")
@@ -98,9 +106,9 @@ def pipeline_qa_trigger(event: func.EventGridEvent):
     # Load historical baseline
     baseline = load_baseline(pipeline_name)
 
-    # Run QA analysis
-    agent_id = os.environ.get("QA_AGENT_ID") or create_qa_agent()
-    report = run_qa_analysis(agent_id, pipeline_name, stats, baseline)
+    # Run QA analysis — no agent registration; the Responses API takes the
+    # instructions + tools on each call
+    report = run_qa_analysis(pipeline_name, stats, baseline)
 
     # Save updated baseline
     save_baseline(pipeline_name, stats)
@@ -186,29 +194,43 @@ def save_baseline(pipeline_name: str, stats: dict):
     )
 ```
 
-### Step 5 — Create the QA agent with Code Interpreter
+### Step 5 — Run QA analysis with Code Interpreter + alerts
+
+There's no separate agent to register. The Responses API takes the instructions and the tools — `code_interpreter` (for the statistical checks) and a `send_alert` **function** tool — on each call. Code Interpreter runs its tool loop server-side; only the custom `send_alert` function needs a round-trip from your code.
 
 ```python
-from azure.ai.projects.models import (
-    CodeInterpreterTool, FunctionTool, PromptAgentDefinition, MessageRole,
-    SubmitToolOutputsAction
-)
-import time
-
-ALERT_TOOL_DEF = {
-    "name": "send_alert",
-    "description": "Send a data quality alert when anomalies exceed thresholds.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
-            "anomaly_type": {"type": "string"},
-            "pipeline_name": {"type": "string"},
-            "details": {"type": "string"}
+# Responses API tools: Code Interpreter + a custom function tool.
+# Function tools are FLAT in the Responses API (no nested "function" key).
+TOOLS = [
+    {"type": "code_interpreter", "container": {"type": "auto"}},
+    {
+        "type": "function",
+        "name": "send_alert",
+        "description": "Send a data quality alert when anomalies exceed thresholds.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
+                "anomaly_type": {"type": "string"},
+                "pipeline_name": {"type": "string"},
+                "details": {"type": "string"},
+            },
+            "required": ["severity", "anomaly_type", "pipeline_name", "details"],
         },
-        "required": ["severity", "anomaly_type", "pipeline_name", "details"]
-    }
-}
+    },
+]
+
+INSTRUCTIONS = (
+    "You are a data pipeline QA analyst. Given current run statistics and "
+    "historical baseline, perform anomaly detection.\n\n"
+    "Use the python (code_interpreter) tool to run these checks:\n"
+    "1. Row count deviation: flag if >20% from baseline average\n"
+    "2. Null rate spike: flag if any column null rate increased >5 percentage points\n"
+    "3. Schema drift: flag if schema hash differs from baseline\n"
+    "4. Duration anomaly: flag if run took >50% longer than baseline average\n\n"
+    "Compute z-scores for row count and duration. Generate a QA report as markdown.\n\n"
+    "If any check fails with severity WARNING or higher, call send_alert()."
+)
 
 
 def send_alert(severity: str, anomaly_type: str, pipeline_name: str, details: str) -> str:
@@ -232,66 +254,48 @@ def send_alert(severity: str, anomaly_type: str, pipeline_name: str, details: st
     return json.dumps({"sent": True, "severity": severity})
 
 
-def create_qa_agent() -> str:
-    code_interpreter = CodeInterpreterTool()
-    alert_tool = FunctionTool(functions=[ALERT_TOOL_DEF])
-
-    agent_def = PromptAgentDefinition(
-        model="gpt-4.1-mini",
-        name="pipeline-qa-agent",
-        instructions=(
-            "You are a data pipeline QA analyst. Given current run statistics and "
-            "historical baseline, perform anomaly detection.\n\n"
-            "Use Code Interpreter to run these checks in Python:\n"
-            "1. Row count deviation: flag if >20% from baseline average\n"
-            "2. Null rate spike: flag if any column null rate increased >5 percentage points\n"
-            "3. Schema drift: flag if schema hash differs from baseline\n"
-            "4. Duration anomaly: flag if run took >50% longer than baseline average\n\n"
-            "Compute z-scores for row count and duration. "
-            "Generate a QA report as markdown.\n\n"
-            "If any check fails with severity WARNING or higher, call send_alert()."
-        ),
-        tools=[code_interpreter.definitions, *alert_tool.definitions],
-        tool_resources=code_interpreter.resources,
-    )
-    agent = ai_client.agents.create_version(definition=agent_def)
-    return agent.id
+TOOL_HANDLERS = {"send_alert": send_alert}
 
 
-def run_qa_analysis(agent_id: str, pipeline_name: str, stats: dict, baseline: dict | None) -> str:
-    thread = ai_client.agents.create_thread()
-    ai_client.agents.create_message(
-        thread_id=thread.id,
-        role=MessageRole.USER,
-        content=(
+def run_qa_analysis(pipeline_name: str, stats: dict, baseline: dict | None) -> str:
+    """Run QA analysis via the Responses API; satisfy any send_alert calls."""
+    response = client.responses.create(
+        model=MODEL,
+        instructions=INSTRUCTIONS,
+        input=(
             f"Run QA analysis for pipeline: **{pipeline_name}**\n\n"
             f"Current run stats:\n```json\n{json.dumps(stats, indent=2)}\n```\n\n"
             f"Historical baseline:\n```json\n{json.dumps(baseline or {}, indent=2)}\n```\n\n"
             "Generate a QA report and alert on any anomalies."
-        )
+        ),
+        tools=TOOLS,
     )
 
-    run = ai_client.agents.create_run(thread_id=thread.id, agent_id=agent_id)
+    # Code Interpreter runs server-side; only the custom function needs a round-trip.
+    for _ in range(8):  # safety cap on function-call rounds
+        fn_calls = [it for it in response.output
+                    if getattr(it, "type", None) == "function_call"]
+        if not fn_calls:
+            break
+        tool_outputs = []
+        for call in fn_calls:
+            handler = TOOL_HANDLERS.get(call.name)
+            args = json.loads(call.arguments or "{}")
+            result = handler(**args) if handler else json.dumps(
+                {"error": f"Unknown function: {call.name}"})
+            tool_outputs.append({
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": result,
+            })
+        response = client.responses.create(
+            model=MODEL,
+            previous_response_id=response.id,
+            input=tool_outputs,
+            tools=TOOLS,
+        )
 
-    while run.status in ("queued", "in_progress", "requires_action"):
-        time.sleep(1)
-        run = ai_client.agents.get_run(thread_id=thread.id, run_id=run.id)
-
-        if run.status == "requires_action":
-            action = run.required_action
-            if isinstance(action, SubmitToolOutputsAction):
-                outputs = []
-                for call in action.submit_tool_outputs.tool_calls:
-                    if call.function.name == "send_alert":
-                        args = json.loads(call.function.arguments)
-                        result = send_alert(**args)
-                        outputs.append({"tool_call_id": call.id, "output": result})
-                run = ai_client.agents.submit_tool_outputs_to_run(
-                    thread_id=thread.id, run_id=run.id, tool_outputs=outputs
-                )
-
-    messages = ai_client.agents.list_messages(thread_id=thread.id)
-    return messages.get_last_message_by_role(MessageRole.ASSISTANT).content[0].text.value
+    return response.output_text
 ```
 
 ---
@@ -304,7 +308,6 @@ Send a simulated Event Grid event locally:
 def test_qa_locally():
     """Test the QA pipeline without a real Event Grid event."""
     pipeline_name = "sales-data-pipeline"
-    agent_id = create_qa_agent()
 
     # Simulate a run with a row count anomaly
     stats = {
@@ -326,7 +329,7 @@ def test_qa_locally():
         "null_rate_history": {"customer_id": 0.001, "amount": 0.02}
     }
 
-    report = run_qa_analysis(agent_id, pipeline_name, stats, baseline)
+    report = run_qa_analysis(pipeline_name, stats, baseline)
     print(report)
 
 test_qa_locally()
@@ -336,6 +339,8 @@ test_qa_locally()
 
 ## Common Mistakes
 
+- **Reaching for the old Assistants `agents` API.** `azure-ai-projects` 2.x removed the threads/runs Assistants surface — `AIProjectClient` has no `.agents`, and `MessageRole`/`SubmitToolOutputsAction` aren't importable from `azure.ai.projects.models`. Drive the QA agent with `client.responses.create(..., tools=[code_interpreter, send_alert])` and a function-call loop, as shown above.
+- **Nesting the function tool like Chat Completions.** In the Responses API a function tool is flat — `{"type": "function", "name": ..., "parameters": ...}` — not `{"type": "function", "function": {...}}`. Parsing also differs: function calls arrive as `output` items with `type == "function_call"` (use `call.name`, `call.arguments`, `call.call_id`), and you return results as `{"type": "function_call_output", "call_id": ..., "output": ...}`.
 - **Agent not detecting anomalies because baseline is None.** On first run, there's no baseline. Have the agent document that baselines are being established rather than failing silently.
 - **Code Interpreter output not included in report.** Always check that `content` blocks include the code output. If the agent generates charts, retrieve them with `get_file_content`.
 - **Event Grid event schema varies by ADF version.** Test with `az eventgrid event-subscription show` to confirm the actual fields in your pipeline completion events before coding against them.

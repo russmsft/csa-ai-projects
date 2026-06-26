@@ -2,7 +2,7 @@
 
 Microsoft Foundry has **no native cross-region failover** — if your primary region goes dark, traffic does not automatically move. This guide is the blueprint for the failover layer you have to build yourself, so a regional outage degrades to a blip instead of an incident bridge.
 
-> **Platform note:** This is the portfolio's capstone — an **architecture and resilience** guide, not a single-script build. It assumes you've shipped a few of the earlier projects ([01](01-ask-my-docs.md), [04](04-policy-chatbot.md), [06](06-multi-agent-incident-responder.md)) and now need to make one of them survive a region outage in front of a customer's risk and compliance team.
+> **Platform note:** This is the portfolio's **production-hardening guide** — an **architecture and resilience** guide, not a single-script build. It assumes you've shipped a few of the earlier projects ([01](01-ask-my-docs.md), [04](04-policy-chatbot.md), [06](06-multi-agent-incident-responder.md)) and now need to make one of them survive a region outage in front of a customer's risk and compliance team.
 
 ---
 

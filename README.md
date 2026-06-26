@@ -459,4 +459,4 @@ If you change the project list, ordering, models, or roadmap, update this README
 
 ---
 
-*CSU Cloud & AI — May 2026. All projects run on Microsoft Foundry.*
+*Cloud & AI — May 2026. All projects run on Microsoft Foundry.*

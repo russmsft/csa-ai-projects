@@ -163,6 +163,8 @@ The secondary region's models must be a byte-for-byte match of the primary: same
 - Keep the deployment definition in IaC so both regions deploy from the same source.
 - Re-validate quota in the secondary on a schedule — quota can be reclaimed while a region sits idle.
 
+> The **deployment type** (Global Standard / Data Zone Standard / Standard / Provisioned) decides where inference is processed and how much model availability you get in each region. That choice constrains which region pairs are even viable — see [Deployment Types & Data Residency](#deployment-types--data-residency) below.
+
 ### Step 4 — Agent layer (warm standby, recreate on failover)
 
 This is where Foundry's constraints bite hardest. **You do not fail an agent over — you recreate it.** Treat agent definitions as code:
@@ -184,6 +186,8 @@ A minimal "agent definition as code" record you can store in Cosmos and replay:
 ```
 
 > For **Hot/Hot**, duplicated agents only work for stateless patterns — there's no shared server-side agent state across regions.
+
+> An agent is more than its definition — it depends on threads, knowledge sources, tool connections, and backing stores, each with its own DR implication. For the full dependency breakdown and the production-grade rehydration pattern, see [Agent Service DR: The Stateful Nuance](#agent-service-dr-the-stateful-nuance) below.
 
 ### Step 5 — Data layer (replicate or restore)
 
@@ -297,6 +301,57 @@ The whole pattern collapses if the two regions drift apart. Lock it down:
 - **Dual-region CI/CD pipelines** that deploy to primary and secondary from the same commit.
 - **Version-controlled agent definitions and model configs** (Steps 3–4) deployed by the same pipeline.
 - A scheduled **drift-detection** job (e.g. `terraform plan` / `what-if`) that fails the build if the regions diverge.
+
+---
+
+## Deployment Types & Data Residency
+
+The Foundry **deployment type** decides *where* inference is processed, *how* capacity is allocated, and *how predictable* performance is. It directly constrains which region pairs are viable for failover — a model you can reach in one region under Global Standard may not be deployable as Standard in your secondary at all.
+
+| Deployment type | Data processing | Capacity model | Best for |
+|-----------------|-----------------|----------------|----------|
+| **Global Standard** | Prompts/responses may be processed in **any** Azure region where the model is available | Pay-per-token, shared | Broadest model access, highest default quota, fastest access to new models |
+| **Data Zone Standard** | Processed only within a **Microsoft-defined data zone** (typically US or EU) | Pay-per-token, shared | US/EU data-boundary control without pinning to a single region |
+| **Standard** | Processed only in the **selected Azure region** | Pay-per-token, shared regional | Strict single-region data residency, or lower/medium-volume workloads |
+| **Provisioned** | Depends on the chosen flavour: global, data zone, or regional | **Reserved PTU** capacity | Predictable throughput, low latency variance, mission-critical workloads |
+
+In customer terms:
+
+- **Global Standard** gives the widest model availability and quota, but inference can be processed anywhere globally.
+- **Data Zone Standard** keeps processing inside a defined boundary such as the EU or US.
+- **Standard** pins processing to one Azure region, but model availability and quota may be more limited there.
+- **Provisioned** reserves dedicated capacity via PTUs — best where predictable performance matters.
+
+**Failover implication:** for a customer needing a model that isn't offered in their current region, Global Standard or Data Zone Standard may unlock broader availability. But if they require strict regional processing, both the primary and secondary must run **Standard** (or **Regional Provisioned**) in regions where that exact model and version exist — confirm this before committing to a region pair (see [Prerequisites](#prerequisites)).
+
+---
+
+## Agent Service DR: The Stateful Nuance
+
+Do not position Foundry Agent Service as a simple active-active service. Unlike a model endpoint, **an agent is stateful** — it depends on runtime data, tool connections, knowledge sources, and backing stores. Models can be duplicated across regions; **agents must be rebuilt or rehydrated** from controlled configuration and recoverable state stores.
+
+An agent typically depends on:
+
+| Dependency | DR implication |
+|------------|----------------|
+| **Agent definition** | Instructions, model choice, tools, policies, and configuration must be reproducible |
+| **Conversation threads** | Session history depends on backing state stores |
+| **Knowledge sources** | Files, indexes, vector stores, and search indexes must exist or be rebuildable in the recovery region |
+| **Tool connections** | APIs, Functions, Logic Apps, credentials, managed identities, and RBAC must work in the secondary region |
+| **Cosmos DB, AI Search, Storage** | These determine what can *actually* be recovered after an outage |
+
+**Prefer Standard agent mode for production DR.** In Standard mode, state sits in **customer-managed** Cosmos DB, Azure AI Search, and Storage — which gives the customer control over backup, replication, restore, and regional recovery. (In the fully managed mode, you don't own those stores and can't drive their failover.)
+
+**Recommended pattern:**
+
+1. Store agent **definitions, prompts, tools, policies, model deployment names, and knowledge bindings** in source control.
+2. **Pre-provision** the secondary Foundry project, models, identities, networking, Key Vault, Search, Cosmos DB, Storage, and tool endpoints.
+3. **Replicate or restore** stateful dependencies using each service's own DR capabilities (see [Step 5](#step-5--data-layer-replicate-or-restore)).
+4. **Rehydrate** the agent during failover by redeploying its definition and reconnecting tools and knowledge sources (see [Step 7](#step-7--failover-orchestration)).
+5. **Validate** with a test conversation and an end-to-end tool invocation.
+6. Treat **thread-uploaded files as transient** unless they're written to authoritative storage and indexed from there.
+
+> **Customer message:** models can be duplicated across regions; agents must be rebuilt or rehydrated from controlled configuration and recoverable state stores.
 
 ---
 

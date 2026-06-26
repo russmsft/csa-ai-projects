@@ -94,6 +94,13 @@ Every customer asks some version of *"Can AI search our documents?"* This is you
 
 **You'll use:** Foundry project + prompt agent, File Search tool, GPT-4.1-mini or GPT-5.4-mini, Azure Blob Storage.
 
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 01](docs/how-to/images/01-ask-my-docs-architecture.png)
+
+</details>
+
 📘 **Build it:** [Guide 01 — Ask My Docs](docs/how-to/01-ask-my-docs.md) · runnable code at [`src/ask_my_docs.py`](src/ask_my_docs.py)
 
 ---
@@ -105,6 +112,13 @@ Every customer asks some version of *"Can AI search our documents?"* This is you
 The demo where people lean forward and say *"wait, I actually want that."* Audio in, structured notes out: transcribe a meeting with Foundry audio models, then hand the transcript to a prompt agent that extracts action items, decisions, and a summary.
 
 **You'll use:** Foundry, GPT-4o audio or Whisper (transcription), GPT-4.1-mini (summarization), Foundry Agent Service. Optional: Azure Functions timer trigger for batch.
+
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 02](docs/how-to/images/02-meeting-minutes-agent-architecture.png)
+
+</details>
 
 📘 **Build it:** [Guide 02 — Meeting Minutes Agent](docs/how-to/02-meeting-minutes-agent.md)
 
@@ -118,6 +132,13 @@ Every support inbox is drowning. Build an agent that reads tickets from a queue,
 
 **You'll use:** Foundry (prompt agent with function calling), GPT-4.1-mini + GPT-5.4-mini, Azure Service Bus, Azure AI Search + Foundry IQ, Azure Cosmos DB.
 
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 03](docs/how-to/images/03-email-triage-agent-architecture.png)
+
+</details>
+
 📘 **Build it:** [Guide 03 — Email Triage Agent](docs/how-to/03-email-triage-agent.md)
 
 ---
@@ -129,6 +150,13 @@ Every support inbox is drowning. Build an agent that reads tickets from a queue,
 *"How many vacation days do I have left?"* The answer is in a 200-page PDF nobody reads. This one uses **Foundry IQ** — turnkey RAG that handles chunking and embedding for you. The skill you're building: knowing when the managed path is the right call (start here, graduate to custom RAG when you need chunking control).
 
 **You'll use:** Foundry with Foundry IQ, GPT-4.1-mini, Microsoft Entra ID (auth), Azure App Service (chat UI).
+
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 04](docs/how-to/images/04-policy-chatbot-architecture.png)
+
+</details>
 
 📘 **Build it:** [Guide 04 — Policy Chatbot](docs/how-to/04-policy-chatbot.md)
 
@@ -142,6 +170,13 @@ Legal review runs at $500/hour. Build an agent with Code Interpreter that extrac
 
 **You'll use:** Foundry (prompt agent with Code Interpreter), GPT-5.4 (1M-token context fits the whole contract), Azure AI Document Intelligence, Blob Storage, Cosmos DB.
 
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 05](docs/how-to/images/05-contract-clause-analyzer-architecture.png)
+
+</details>
+
 📘 **Build it:** [Guide 05 — Contract Clause Analyzer](docs/how-to/05-contract-clause-analyzer.md)
 
 ---
@@ -153,6 +188,13 @@ Legal review runs at $500/hour. Build an agent with Code Interpreter that extrac
 Your *"I didn't know you could do that"* demo. Three agents, one incident, all working concurrently: a **Diagnostician** reads logs and metrics, a **Researcher** searches runbooks and past incidents, and a **Communicator** drafts stakeholder updates. This is where multi-agent orchestration stops being abstract.
 
 **You'll use:** Foundry (workflow agent orchestrating 3 prompt agents), GPT-5.4-mini, Azure Monitor / Application Insights, Azure AI Search. For code-level control: Microsoft Agent Framework.
+
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 06](docs/how-to/images/06-multi-agent-incident-responder-architecture.png)
+
+</details>
 
 📘 **Build it:** [Guide 06 — Multi-Agent Incident Responder](docs/how-to/06-multi-agent-incident-responder.md)
 
@@ -166,6 +208,13 @@ Nobody wants to find bad data in a dashboard two days after the pipeline broke. 
 
 **You'll use:** Foundry (prompt agent with Code Interpreter), GPT-4.1-mini + codex-mini, Azure Functions (Event Grid / change-feed trigger), Cosmos DB, Data Factory or Microsoft Fabric.
 
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 07](docs/how-to/images/07-data-pipeline-qa-agent-architecture.png)
+
+</details>
+
 📘 **Build it:** [Guide 07 — Data Pipeline QA Agent](docs/how-to/07-data-pipeline-qa-agent.md)
 
 ---
@@ -177,6 +226,13 @@ Nobody wants to find bad data in a dashboard two days after the pipeline broke. 
 *"What's the torque spec for the Model 7200 compressor valve?"* — asked out loud, hands full, answered out loud from the actual equipment manual. A mobile-friendly web app on GPT-4o Realtime for low-latency voice. Manufacturing and energy customers light up when their own technical docs answer voice queries.
 
 **You'll use:** Foundry, GPT-4o Realtime, Azure AI Search (manual index with text-embedding-3-large), Azure Container Apps, App Service, Blob Storage.
+
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 08](docs/how-to/images/08-voice-field-assistant-architecture.png)
+
+</details>
 
 📘 **Build it:** [Guide 08 — Voice Field Assistant](docs/how-to/08-voice-field-assistant.md)
 
@@ -190,6 +246,13 @@ Strategy teams burn 15–20 hours a week manually scanning competitor sites, new
 
 **You'll use:** Foundry (prompt agent with Web Search + Code Interpreter), GPT-5.4, Foundry Agent Service (scheduled runs), Cosmos DB, Container Apps, Static Web Apps, Azure Functions.
 
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 09](docs/how-to/images/09-competitive-intelligence-dashboard-architecture.png)
+
+</details>
+
 📘 **Build it:** [Guide 09 — Competitive Intelligence Dashboard](docs/how-to/09-competitive-intelligence-dashboard.md)
 
 ---
@@ -201,6 +264,13 @@ Strategy teams burn 15–20 hours a week manually scanning competitor sites, new
 Some things shouldn't be fully autonomous — this project teaches you why. A workflow agent handles multi-step approvals: it reads the request, checks policy, routes to the right approver, chases stale approvals, and logs everything — but a **human makes the actual decision**. The agent prepares; the human approves. The value isn't just speed, it's the audit trail.
 
 **You'll use:** Foundry (workflow agent with human-in-the-loop), Foundry Agent Service, GPT-4.1-mini, Foundry IQ, Service Bus, Cosmos DB, Microsoft Graph API, Entra ID.
+
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 10](docs/how-to/images/10-agentic-approval-workflow-architecture.png)
+
+</details>
 
 📘 **Build it:** [Guide 10 — Agentic Approval Workflow](docs/how-to/10-agentic-approval-workflow.md)
 
@@ -216,6 +286,13 @@ Every enterprise has a terrible legacy app with no API that someone clicks throu
 
 **You'll use:** Foundry, GPT-5.4 with computer-use (Responses API), Container Apps, Microsoft Agent Framework, Azure Key Vault.
 
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 11](docs/how-to/images/11-computer-use-automator-architecture.png)
+
+</details>
+
 📘 **Build it:** [Guide 11 — Computer-Use Automator](docs/how-to/11-computer-use-automator.md)
 
 ---
@@ -228,6 +305,13 @@ The hardest build here, and the highest-value demo for manufacturing. Production
 
 **You'll use:** Foundry (hosted agent with Microsoft Agent Framework), GPT-5.4 (vision), Azure AI Search (image embeddings), Azure IoT Hub, Container Apps, Cosmos DB, Event Hubs, Azure Monitor + Application Insights.
 
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 12](docs/how-to/images/12-multimodal-quality-inspector-architecture.png)
+
+</details>
+
 📘 **Build it:** [Guide 12 — Multi-Modal Quality Inspector](docs/how-to/12-multimodal-quality-inspector.md)
 
 ---
@@ -239,6 +323,13 @@ The hardest build here, and the highest-value demo for manufacturing. Production
 The production-hardening guide that turns a demo into something a customer can run in production. Microsoft Foundry has **no native cross-region failover** — if the primary region goes dark, traffic doesn't move on its own. This guide is the blueprint for the failover layer you build yourself: Front Door routing, APIM as an AI gateway, identical model deployments in a paired region, a geo-replicated data layer, and a runbook that handles the part Foundry won't — **recreating stateful Agent Service agents** on failover. You also get the framework to choose Hot/Hot, Hot/Warm, or Hot/Cold against a customer's RTO/RPO and budget. Build this after you've shipped a few of the earlier projects and a customer asks *"but what happens when a region goes down?"*
 
 **You'll use:** Microsoft Foundry (paired regions), Azure Front Door, Azure API Management, Cosmos DB (geo-replication), Azure AI Search, Storage (GZRS/RA-GRS), Key Vault, ACR, Bicep/Terraform, Azure Monitor + Log Analytics.
+
+<details>
+<summary>📐 <strong>Architecture diagram</strong></summary>
+
+![Architecture diagram for project 13](docs/how-to/images/13-cross-region-failover-architecture.png)
+
+</details>
 
 📘 **Build it:** [Guide 13 — Cross-Region Failover](docs/how-to/13-cross-region-failover.md)
 

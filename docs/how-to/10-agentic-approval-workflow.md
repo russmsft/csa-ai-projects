@@ -12,15 +12,16 @@ A Service Bus-triggered Azure Function kicks off a Foundry agent workflow. The a
 
 ## Prerequisites
 
-- Microsoft Foundry project with Foundry IQ + GPT-5.4-mini deployed
+- Microsoft Foundry / Azure AI Services resource with Foundry IQ + GPT-5.4-mini deployed
 - Azure Service Bus namespace (request queue)
 - Azure Cosmos DB (for decision audit log)
 - Microsoft Graph API access (Delegated or App permissions: `Chat.Create`, `TeamsMessage.Send`)
 - Entra ID app registration with Graph permissions
-- Python 3.11+, `azure-functions`, `azure-ai-projects`, `azure-servicebus`, `azure-cosmos`, `msal`
+- Azure CLI logged in (`az login`) with **Cognitive Services OpenAI User** on the AI Services resource and **Cosmos DB Built-in Data Contributor** on the Cosmos account
+- Python 3.11+, `azure-functions`, `openai`, `azure-servicebus`, `azure-cosmos`, `msal`
 
 ```bash
-pip install azure-ai-projects azure-identity azure-functions \
+pip install "openai>=1.30.0" azure-identity azure-functions \
   azure-servicebus azure-cosmos msal python-dotenv
 ```
 
@@ -269,24 +270,25 @@ def send_approval_card(
 ```python
 # function_app.py
 import azure.functions as func
-import json, os, logging, time, uuid
+import json, os, logging, uuid
 from datetime import datetime, timezone
 from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential
-from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import (
-    FunctionTool, FileSearchTool, PromptAgentDefinition,
-    MessageRole, SubmitToolOutputsAction
-)
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 from approver_rules import determine_approver, APPROVER_TOOL_DEF
 from graph_client import send_approval_card
 
 app = func.FunctionApp()
 credential = DefaultAzureCredential()
 
-ai_client = AIProjectClient(
-    endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
-    credential=credential
+# One Responses-API client drives the policy agent (Foundry IQ file_search +
+# the determine_approver function tool). azure-ai-projects 2.x removed the
+# Assistants threads/runs surface; the Responses API replaces it.
+client = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    azure_ad_token_provider=get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"),
+    api_version="2025-04-01-preview",
 )
 cosmos = CosmosClient(
     url=os.environ["COSMOS_ENDPOINT"],
@@ -295,27 +297,21 @@ cosmos = CosmosClient(
 decisions = cosmos.get_database_client("approval-workflow").get_container_client("decisions")
 
 CALLBACK_BASE_URL = os.environ["FUNCTION_APP_BASE_URL"]
+MODEL = os.environ.get("APPROVAL_MODEL", "gpt-5.4-mini")
 
+# Responses API tools: Foundry IQ grounding via file_search + a flat function tool.
+TOOLS = [
+    {"type": "file_search", "vector_store_ids": [os.environ["POLICY_VECTOR_STORE_ID"]]},
+    {"type": "function", **APPROVER_TOOL_DEF},
+]
 
-def create_policy_agent() -> str:
-    function_tool = FunctionTool(functions=[APPROVER_TOOL_DEF])
-    file_search = FileSearchTool(vector_store_ids=[os.environ["POLICY_VECTOR_STORE_ID"]])
-
-    agent_def = PromptAgentDefinition(
-        model="gpt-5.4-mini",
-        name="approval-policy-agent",
-        instructions=(
-            "You are an approval workflow agent. For each request:\n"
-            "1. Check the policy documents to determine if the request is in-policy\n"
-            "2. If in-policy, call determine_approver() to find the right approver\n"
-            "3. Summarize the request in 2 sentences for the approver\n\n"
-            "If the request violates policy, return {is_in_policy: false, reason: '...'}"
-        ),
-        tools=[*function_tool.definitions, *file_search.definitions],
-        tool_resources=file_search.resources,
-    )
-    agent = ai_client.agents.create_version(definition=agent_def)
-    return agent.id
+INSTRUCTIONS = (
+    "You are an approval workflow agent. For each request:\n"
+    "1. Check the policy documents to determine if the request is in-policy\n"
+    "2. If in-policy, call determine_approver() to find the right approver\n"
+    "3. Summarize the request in 2 sentences for the approver\n\n"
+    "If the request violates policy, return {is_in_policy: false, reason: '...'}"
+)
 
 
 @app.service_bus_queue_trigger(
@@ -328,39 +324,41 @@ def process_approval_request(msg: func.ServiceBusMessage):
     request_id = payload.get("request_id", str(uuid.uuid4()))
     logging.info(f"Processing approval request: {request_id}")
 
-    agent_id = os.environ.get("POLICY_AGENT_ID") or create_policy_agent()
-
-    thread = ai_client.agents.create_thread()
-    ai_client.agents.create_message(
-        thread_id=thread.id,
-        role=MessageRole.USER,
-        content=f"Process this approval request:\n\n{json.dumps(payload, indent=2)}"
+    # file_search runs server-side; only determine_approver needs a round-trip.
+    response = client.responses.create(
+        model=MODEL,
+        instructions=INSTRUCTIONS,
+        input=f"Process this approval request:\n\n{json.dumps(payload, indent=2)}",
+        tools=TOOLS,
     )
-    run = ai_client.agents.create_run(thread_id=thread.id, agent_id=agent_id)
 
     approver_info = {}
-    while run.status in ("queued", "in_progress", "requires_action"):
-        time.sleep(1)
-        run = ai_client.agents.get_run(thread_id=thread.id, run_id=run.id)
-        if run.status == "requires_action":
-            action = run.required_action
-            if isinstance(action, SubmitToolOutputsAction):
-                outputs = []
-                for call in action.submit_tool_outputs.tool_calls:
-                    if call.function.name == "determine_approver":
-                        args = json.loads(call.function.arguments)
-                        result = determine_approver(**args)
-                        approver_info = result
-                        outputs.append({"tool_call_id": call.id,
-                                        "output": json.dumps(result)})
-                run = ai_client.agents.submit_tool_outputs_to_run(
-                    thread_id=thread.id, run_id=run.id, tool_outputs=outputs
-                )
+    for _ in range(8):  # safety cap on function-call rounds
+        fn_calls = [it for it in response.output
+                    if getattr(it, "type", None) == "function_call"]
+        if not fn_calls:
+            break
+        tool_outputs = []
+        for call in fn_calls:
+            if call.name == "determine_approver":
+                args = json.loads(call.arguments or "{}")
+                approver_info = determine_approver(**args)
+                result = json.dumps(approver_info)
+            else:
+                result = json.dumps({"error": f"Unknown function: {call.name}"})
+            tool_outputs.append({
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": result,
+            })
+        response = client.responses.create(
+            model=MODEL,
+            previous_response_id=response.id,
+            input=tool_outputs,
+            tools=TOOLS,
+        )
 
-    messages = ai_client.agents.list_messages(thread_id=thread.id)
-    agent_summary = messages.get_last_message_by_role(
-        MessageRole.ASSISTANT
-    ).content[0].text.value
+    agent_summary = response.output_text
 
     # Record pending decision
     decisions.upsert_item({
@@ -452,6 +450,7 @@ curl -X POST "http://localhost:7071/api/handle_approval" \
 
 ## Common Mistakes
 
+- **Reaching for the old Assistants `agents` API.** `azure-ai-projects` 2.x removed the threads/runs Assistants surface — `AIProjectClient` has no `.agents`, and `FunctionTool`/`FileSearchTool`/`PromptAgentDefinition`/`MessageRole`/`SubmitToolOutputsAction` no longer drive a run. Use `client.responses.create(..., tools=[{"type":"file_search", "vector_store_ids":[...]}, {"type":"function", ...}])` and a function-call loop keyed off `previous_response_id`, as shown above.
 - **Adaptive Card Action.Http not supported in all Teams clients.** `Action.Http` requires the Teams client to support it — older desktop clients may not. Test on both desktop and mobile Teams.
 - **Graph API Chat creation fails with 403.** Ensure `Chat.Create` permission was granted admin consent. Check with `az ad app permission list --id $APP_ID`.
 - **Cosmos DB optimistic concurrency.** Two approvers clicking simultaneously can cause conflicts. Add an `_etag` check when updating the decision record.

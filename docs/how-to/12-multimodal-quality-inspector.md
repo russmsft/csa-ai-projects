@@ -12,17 +12,18 @@ A production inspection pipeline using Microsoft Agent Framework (code-based age
 
 ## Prerequisites
 
-- Microsoft Foundry project with GPT-5.4 and `text-embedding-3-large` deployed
+- Microsoft Foundry / Azure AI Services resource with GPT-5.4 and `text-embedding-3-large` deployed
 - Azure IoT Hub (F1 free tier or S1)
 - Azure Event Hubs (connects to IoT Hub routing)
 - Azure AI Search (Basic tier, vector search enabled)
 - Azure Cosmos DB (inspection-results container)
 - Azure Monitor workspace
+- Azure CLI logged in (`az login`) with **Cognitive Services OpenAI User** on the AI Services resource and **Cosmos DB Built-in Data Contributor** on the Cosmos account
 - Python 3.11+
-- `azure-ai-projects`, `azure-eventhub`, `azure-search-documents`, `azure-cosmos`, `azure-identity`, `Pillow`
+- `openai`, `azure-eventhub`, `azure-search-documents`, `azure-cosmos`, `azure-identity`, `Pillow`
 
 ```bash
-pip install azure-ai-projects azure-identity azure-eventhub \
+pip install "openai>=1.30.0" azure-identity azure-eventhub \
   azure-search-documents azure-cosmos Pillow python-dotenv
 ```
 
@@ -110,17 +111,20 @@ from azure.search.documents.indexes.models import (
     SemanticSearch
 )
 from azure.core.credentials import AzureKeyCredential
-from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 
 SEARCH_ENDPOINT = os.environ["SEARCH_ENDPOINT"]
 SEARCH_KEY = os.environ["SEARCH_KEY"]
 INDEX_NAME = "defect-catalog"
 EMBEDDING_DEPLOYMENT = "text-embedding-3-large"
 
-PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
-ai_client = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=DefaultAzureCredential())
-openai = ai_client.get_openai_client()
+openai = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    azure_ad_token_provider=get_bearer_token_provider(
+        DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"),
+    api_version="2025-04-01-preview",
+)
 
 index_client = SearchIndexClient(
     endpoint=SEARCH_ENDPOINT,
@@ -245,20 +249,23 @@ from azure.search.documents import SearchClient
 from azure.search.documents.models import VectorizedQuery
 from azure.core.credentials import AzureKeyCredential
 from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential
-from azure.ai.projects import AIProjectClient
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
 
 logger = logging.getLogger("quality-inspector")
 
 SEARCH_ENDPOINT = os.environ["SEARCH_ENDPOINT"]
 SEARCH_KEY = os.environ["SEARCH_KEY"]
 COSMOS_ENDPOINT = os.environ["COSMOS_ENDPOINT"]
-PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
 DEFECT_THRESHOLD = float(os.environ.get("DEFECT_THRESHOLD", "0.75"))
 
 credential = DefaultAzureCredential()
-ai_client = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=credential)
-openai = ai_client.get_openai_client()
+openai = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    azure_ad_token_provider=get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"),
+    api_version="2025-04-01-preview",
+)
 cosmos = CosmosClient(url=COSMOS_ENDPOINT, credential=credential)
 results_container = cosmos.get_database_client("quality-inspection") \
                           .get_container_client("inspection-results")

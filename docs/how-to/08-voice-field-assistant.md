@@ -19,7 +19,7 @@ A FastAPI WebSocket server that bridges browser microphone audio to the GPT-4o R
 - `fastapi`, `uvicorn[standard]`, `websockets`, `azure-search-documents`, `azure-identity`
 
 ```bash
-pip install fastapi "uvicorn[standard]" websockets azure-ai-projects \
+pip install fastapi "uvicorn[standard]" websockets \
   azure-search-documents azure-identity python-dotenv
 ```
 
@@ -141,7 +141,6 @@ import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 from search import search_manuals
 
@@ -149,13 +148,15 @@ load_dotenv()
 logger = logging.getLogger("field-assistant")
 app = FastAPI()
 
-PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
+# The Realtime API is reached over a raw WebSocket (below), not the
+# azure-ai-projects client — so we only need the endpoint and a token here.
+PROJECT_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 
 def get_realtime_url() -> str:
     """Build the Realtime API WebSocket URL for Foundry."""
-    # Foundry Realtime endpoint format
-    base = PROJECT_ENDPOINT.rstrip("/")
-    return f"{base}/realtime?api-version=2024-12-01-preview&deployment=gpt-4o-realtime-preview"
+    # wss:// scheme on the Foundry/Azure OpenAI endpoint
+    base = PROJECT_ENDPOINT.rstrip("/").replace("https://", "wss://", 1)
+    return f"{base}/openai/realtime?api-version=2024-12-01-preview&deployment=gpt-4o-realtime-preview"
 
 
 def get_auth_header() -> dict:

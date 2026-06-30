@@ -1,8 +1,8 @@
 # AI Projects for Cloud Solution Architects
 
-A curated portfolio of **12 AI project ideas** — each with a step-by-step build guide — for Cloud Solution Architects at Microsoft Cloud & AI, plus a **production-hardening guide** for taking them to production. Build them to **sharpen your AI skills**, **show customers what's possible**, and **kick-start co-build POCs**. Everything runs on **Microsoft Foundry** (not standalone Azure OpenAI, not third-party).
+A curated portfolio of **12 AI project ideas** — each with a step-by-step build guide — for Cloud Solution Architects, plus a **production-hardening guide** for taking them to production. Build them to **sharpen your AI skills**, **show customers what's possible**, and **kick-start co-build POCs**.
 
-You know cloud. These projects build your fluency with the AI stack and leave you with working demos on your laptop — not slides. So when a customer asks *"so what can this actually do?"*, you show them.
+These projects build your fluency with the AI stack and leave you with working demos on your laptop — not slides. So when a customer asks *"so what can this actually do?"*, you show them.
 
 ---
 
